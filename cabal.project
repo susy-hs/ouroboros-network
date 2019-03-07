@@ -17,6 +17,9 @@ package ouroboros-network
 package ouroboros-consensus
   tests: True
 
+package basic-tracer
+  tests: False
+
 source-repository-package
   type: git
   location: https://github.com/input-output-hk/iohk-monitoring-framework

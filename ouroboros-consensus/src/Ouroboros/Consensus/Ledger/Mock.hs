@@ -395,6 +395,9 @@ instance OuroborosTag p => UpdateLedger (SimpleBlock p c) where
 
   data LedgerError (SimpleBlock p c) = LedgerErrorInvalidInputs InvalidInputs
     deriving (Show)
+  data LedgerConfig (SimpleBlock p c) = MockLedgerConfig
+
+  applyLedgerHeader _ _ = pure
 
   -- | For the mock implementation, we don't need any state for header
   -- validation at all, after all, we validate blocks /anyway/. The only thing
@@ -402,7 +405,7 @@ instance OuroborosTag p => UpdateLedger (SimpleBlock p c) where
   data HeaderState (SimpleBlock p c) = SimpleHeaderState
 
   -- Apply a block to the ledger state
-  applyLedgerState b (SimpleLedgerState u c) = do
+  applyLedgerBlock _ b (SimpleLedgerState u c) = do
       u' <- withExceptT LedgerErrorInvalidInputs $ updateUtxo b u
       return $ SimpleLedgerState u' (c `Set.union` confirmed b)
 
@@ -412,6 +415,8 @@ instance OuroborosTag p => UpdateLedger (SimpleBlock p c) where
 
 deriving instance OuroborosTag p => Show (LedgerState (SimpleBlock p c))
 
+instance OuroborosTag p => LedgerConfigView (SimpleBlock p c) where
+  ledgerConfigView = const MockLedgerConfig
 {-------------------------------------------------------------------------------
   Support for various consensus algorithms
 -------------------------------------------------------------------------------}
@@ -428,8 +433,8 @@ instance (BftCrypto c, SimpleBlockCrypto c')
 -- | Mock ledger is capable of running PBFT, but we simply assume the delegation
 -- map and the protocol parameters can be found statically in the node
 -- configuration.
-instance (PBftCrypto c, SimpleBlockCrypto c')
-  => ProtocolLedgerView (SimpleBlock (ExtNodeConfig (PBftLedgerView c) (PBft c)) c') where
+instance (SimpleBlockCrypto c')
+  => ProtocolLedgerView (SimpleBlock (ExtNodeConfig (PBftLedgerView PBftMockCrypto) (PBft PBftMockCrypto)) c') where
   protocolLedgerView (EncNodeConfig _ pbftParams) _ls = pbftParams
 
 instance ( PraosCrypto c, SimpleBlockCrypto c')

@@ -127,7 +127,8 @@ handleSimpleNode p CLI{..} (TopologyInfo myNodeId topologyFile) = do
 
       btime  <- realBlockchainTime registry slotDuration systemStart
       let nodeParams = NodeParams
-            { tracer             = nullTracer
+            { encoder            = encode
+            , tracer             = nullTracer
             , threadRegistry     = registry
             , maxClockSkew       = ClockSkew 1
             , cfg                = pInfoConfig

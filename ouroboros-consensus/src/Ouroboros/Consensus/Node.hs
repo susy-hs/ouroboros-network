@@ -28,6 +28,7 @@ module Ouroboros.Consensus.Node (
   , Network.loggingChannel
   ) where
 
+import           Codec.CBOR.Encoding (Encoding)
 import           Codec.Serialise (Serialise)
 import           Control.Monad (void)
 import           Crypto.Random (ChaChaDRG)
@@ -156,7 +157,8 @@ data NodeCallbacks m blk = NodeCallbacks {
 
 -- | Parameters required when initializing a node
 data NodeParams m up blk hdr = NodeParams {
-      tracer             :: Tracer m String
+      encoder            :: PreHeader blk -> Encoding
+    , tracer             :: Tracer m String
     , threadRegistry     :: ThreadRegistry m
     , maxClockSkew       :: ClockSkew
     , cfg                :: NodeConfig (BlockProtocol blk)

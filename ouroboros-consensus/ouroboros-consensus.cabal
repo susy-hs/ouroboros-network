@@ -30,6 +30,7 @@ library
                        Ouroboros.Consensus.ChainSyncClient
                        Ouroboros.Consensus.ChainSyncServer
                        Ouroboros.Consensus.Crypto.DSIGN
+                       Ouroboros.Consensus.Crypto.DSIGN.Cardano
                        Ouroboros.Consensus.Crypto.DSIGN.Class
                        Ouroboros.Consensus.Crypto.DSIGN.Ed448
                        Ouroboros.Consensus.Crypto.DSIGN.Mock
@@ -158,6 +159,7 @@ library
                        bytestring        >=0.10  && <0.11,
                        cardano-binary,
                        cardano-crypto-wrapper,
+                       cardano-ledger,
                        cardano-prelude,
                        cborg             >=0.2.1 && <0.3,
                        containers        >=0.5   && <0.7,

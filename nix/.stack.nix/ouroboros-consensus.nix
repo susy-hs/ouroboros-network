@@ -27,6 +27,7 @@
           (hsPkgs.bytestring)
           (hsPkgs.cardano-binary)
           (hsPkgs.cardano-crypto-wrapper)
+          (hsPkgs.cardano-ledger)
           (hsPkgs.cardano-prelude)
           (hsPkgs.cborg)
           (hsPkgs.containers)
