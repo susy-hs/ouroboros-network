@@ -28,6 +28,7 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Int
 import           Data.Word
 import           Test.QuickCheck
+import           Test.ChainGenerators (TestBlockChainAndUpdates (..))
 import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.QuickCheck (testProperty)
 import           Text.Printf
@@ -40,11 +41,21 @@ import           Control.Monad.Class.MonadThrow
 import           Control.Monad.Class.MonadTimer
 import           Control.Monad.IOSim (runSimStrictShutdown)
 import           Network.TypedProtocol.Channel (recv)
+import           Network.TypedProtocol.Core
 import           Network.TypedProtocol.Driver
 import           Network.TypedProtocol.ReqResp.Client
 import           Network.TypedProtocol.ReqResp.Server
 
+import           Ouroboros.Network.Chain (Chain, ChainUpdate, Point)
+import qualified Ouroboros.Network.Chain as Chain
+import qualified Ouroboros.Network.ChainProducerState as CPS
+import qualified Ouroboros.Network.Protocol.ChainSync.Type     as ChainSync
+import qualified Ouroboros.Network.Protocol.ChainSync.Client   as ChainSync
+import qualified Ouroboros.Network.Protocol.ChainSync.Codec    as ChainSync
+import qualified Ouroboros.Network.Protocol.ChainSync.Examples as ChainSync
+import qualified Ouroboros.Network.Protocol.ChainSync.Server   as ChainSync
 import qualified Ouroboros.Network.Mux as Mx
+import qualified Ouroboros.Network.Mux.Interface as Mx
 import           Ouroboros.Network.Mux.Types (MuxBearer)
 import qualified Ouroboros.Network.Mux.Types as Mx
 import qualified Ouroboros.Network.Mux.Control as Mx
@@ -58,6 +69,8 @@ tests =
   , testProperty "starvation"       prop_mux_starvation
   , testProperty "demuxing (Sim)"   prop_demux_sdu_sim
   , testProperty "demuxing (IO)"    prop_demux_sdu_io
+  , testProperty "ChainSync Demo (IO)"   prop_mux_demo_io
+  , testProperty "ChainSync Demo (Sim)"   prop_mux_demo_sim
   ]
 
 newtype NetworkMagic = NetworkMagic Word32
@@ -318,6 +331,22 @@ startMuxSTM versions mpds style wq rq mtu trace = do
              Right _ -> atomically $ readTBQueue resq
 
     rescb resq e_m = atomically $ writeTBQueue resq e_m
+
+runNetworkNodeWithMuxSTM :: ( MonadAsync m, MonadCatch m, MonadSay m, MonadSTM m, MonadThrow m
+                            , MonadTimer m
+                            , Ord ptcl, Enum ptcl, Bounded ptcl, Mx.ProtocolEnum ptcl, Show ptcl
+                            , Mx.MiniProtocolLimits ptcl )
+                         => [Mx.SomeVersion]
+                         -> (Mx.SomeVersion -> Maybe (ptcl -> Mx.MuxPeer m))
+                         -> Mx.MuxStyle
+                         -> TBQueue m BL.ByteString
+                         -> TBQueue m BL.ByteString
+                         -> Word16
+                         -> Maybe (TBQueue m (Mx.MiniProtocolId ptcl, Mx.MiniProtocolMode, Time m))
+                         -> m (Async m (Maybe SomeException))
+runNetworkNodeWithMuxSTM knownMuxVersions protocols style wq rq mtu trace = do
+    let  mpds sv = (Mx.miniProtocolDescription . ) <$> protocols sv
+    startMuxSTM knownMuxVersions mpds style wq rq mtu trace
 
 queuesAsMuxBearer
   :: forall ptcl m.
@@ -750,3 +779,100 @@ prop_demux_sdu_io :: ArbitrarySDU
                     -> Property
 prop_demux_sdu_io badSdu = ioProperty $ prop_demux_sdu badSdu
 
+prop_mux_demo_io :: TestBlockChainAndUpdates -> Property
+prop_mux_demo_io (TestBlockChainAndUpdates chain updates) =
+    ioProperty $ demo chain updates 100
+
+prop_mux_demo_sim :: TestBlockChainAndUpdates -> Property
+prop_mux_demo_sim (TestBlockChainAndUpdates chain updates) =
+    case runSimStrictShutdown $ demo chain updates 10000 of
+         Left  _ -> property  False
+         Right r -> r
+
+demo :: forall m block.
+        ( MonadAsync m
+        , MonadCatch m
+        , MonadSay m
+        , MonadST m
+        , MonadSTM m
+        , MonadTimer m
+        , Chain.HasHeader block
+        , Serialise block
+        , Eq block
+        , Show block )
+     => Chain block -> [ChainUpdate block] -> Duration (Time m) -> m Property
+demo chain0 updates delay = do
+    client_w <- atomically $ newTBQueue 10
+    client_r <- atomically $ newTBQueue 10
+    let sduLen = 1280
+
+    let server_w = client_r
+        server_r = client_w
+
+    producerVar <- atomically $ newTVar (CPS.initChainProducerState chain0)
+    consumerVar <- atomically $ newTVar chain0
+    done <- atomically newEmptyTMVar
+
+    let Just expectedChain = Chain.applyChainUpdates updates chain0
+        target = Chain.headPoint expectedChain
+
+        consumerPeer :: Peer (ChainSync.ChainSync block (Point block)) AsClient ChainSync.StIdle m ()
+        consumerPeer = ChainSync.chainSyncClientPeer
+                          (ChainSync.chainSyncClientExample consumerVar
+                          (consumerClient done target consumerVar))
+        consumerPeers ReqResp1 = Mx.OnlyClient ChainSync.codecChainSync consumerPeer
+
+        producerPeer :: Peer (ChainSync.ChainSync block (Point block)) AsServer ChainSync.StIdle m ()
+        producerPeer = ChainSync.chainSyncServerPeer (ChainSync.chainSyncServerExample () producerVar)
+        producerPeers ReqResp1 = Mx.OnlyServer ChainSync.codecChainSync producerPeer
+
+    producerAid <- runNetworkNodeWithMuxSTM [version0] (\_ -> Just producerPeers) Mx.StyleServer server_w server_r sduLen Nothing
+
+    consumerAid <- runNetworkNodeWithMuxSTM [version0] (\_ -> Just consumerPeers) Mx.StyleClient client_w client_r sduLen Nothing
+
+
+    updaterAid <- async $ sequence_
+        [ do threadDelay delay -- just to provide interest
+             atomically $ do
+                 p <- readTVar producerVar
+                 let Just p' = CPS.applyChainUpdate update p
+                 writeTVar producerVar p'
+             | update <- updates
+        ]
+
+    wait updaterAid
+    r <- waitBoth producerAid consumerAid
+    case r of
+         (Just _, _) -> return $ property False
+         (_, Just _) -> return $ property False
+         _           -> do
+             ret <- atomically $ takeTMVar done
+             return $ property ret
+
+  where
+    checkTip target consumerVar = atomically $ do
+      chain <- readTVar consumerVar
+      return (Chain.headPoint chain == target)
+
+    -- A simple chain-sync client which runs until it recieves an update to
+    -- a given point (either as a roll forward or as a roll backward).
+    consumerClient :: TMVar m Bool
+                   -> Point block
+                   -> TVar m (Chain block)
+                   -> ChainSync.Client block m ()
+    consumerClient done target chain =
+      ChainSync.Client
+        { ChainSync.rollforward = \_ -> checkTip target chain >>= \b ->
+            if b then do
+                    atomically $ putTMVar done True
+                    pure $ Left ()
+                 else
+                    pure $ Right $ consumerClient done target chain
+        , ChainSync.rollbackward = \_ _ -> checkTip target chain >>= \b ->
+            if b then do
+                    atomically $ putTMVar done True
+                    pure $ Left ()
+                 else
+                    pure $ Right $ consumerClient done target chain
+        , ChainSync.points = \_ -> pure $ consumerClient done target chain
+        }
