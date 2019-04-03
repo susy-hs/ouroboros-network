@@ -60,17 +60,17 @@ import           Test.Tasty.QuickCheck (testProperty)
 tests :: TestTree
 tests =
   testGroup "Socket"
-  [ testProperty "socket send receive IPv4"          prop_socket_send_recv_ipv4
-  , testProperty "socket send receive IPv4 vers neg" prop_socket_send_recv_ipv4_verneg
+  [ -- testProperty "socket send receive IPv4"          prop_socket_send_recv_ipv4
+  -- , testProperty "socket send receive IPv4 vers neg" prop_socket_send_recv_ipv4_verneg
 #ifdef OUROBOROS_NETWORK_IPV6
-  , testProperty "socket send receive IPv6"          prop_socket_send_recv_ipv6
-  , testProperty "socket send receive IPv6 vers neg" prop_socket_send_recv_ipv6_ver_neg
+  -- , testProperty "socket send receive IPv6"          prop_socket_send_recv_ipv6
+  -- , testProperty "socket send receive IPv6 vers neg" prop_socket_send_recv_ipv6_ver_neg
 #endif
-  , testProperty "socket close during receive"       prop_socket_recv_close
-  , testProperty "socket client connection failure"  prop_socket_client_connect_error
-  , testProperty "socket missmatch mux version"      prop_version_missmatch
-  , testProperty "socket missmatch mux network"      prop_network_missmatch
-  , testProperty "socket sync demo"                  prop_socket_demo
+  -- , testProperty "socket close during receive"       prop_socket_recv_close
+  -- , testProperty "socket client connection failure"  prop_socket_client_connect_error
+  -- , testProperty "socket missmatch mux version"      prop_version_missmatch
+  -- , testProperty "socket missmatch mux network"      prop_network_missmatch
+   testProperty "socket sync demo"                  prop_socket_demo
   ]
 
 --
@@ -394,7 +394,7 @@ demo chain0 updates = do
         withConnection consumerNode (nodeAddress producerNet) $ \_ -> do
           void $ fork $ sequence_
               [ do
-                  threadDelay 10000 -- just to provide interest
+                  threadDelay 100 -- just to provide interest
                   atomically $ do
                     p <- readTVar producerVar
                     let Just p' = CPS.applyChainUpdate update p

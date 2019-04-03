@@ -23,12 +23,14 @@ module Ouroboros.Network.Mux (
     ) where
 
 import qualified Codec.CBOR.Read as CBOR
+import qualified Codec.CBOR.Decoding as CBOR
 import           Codec.CBOR.Write (toLazyByteString)
 import           Control.Monad
 import           Control.Monad.Class.MonadAsync
 import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
+import qualified Control.Monad.Fail as Fail
 import           Data.Array
 import qualified Data.ByteString.Lazy as BL
 import           Data.List (intersect)
@@ -153,6 +155,27 @@ muxControl pmss md = do
             retry
     throwM $ MuxError MuxControlProtocolError "MuxControl message on mature MuxBearer" callStack
 
+data AwaitReply = AwaitReply
+
+decodeXXX = do
+      n   <- CBOR.decodeListLen
+      if n == 1
+          then do
+              k <- CBOR.decodeWord
+              if k == 1
+                  then return AwaitReply
+                  else Fail.fail "uninteresting data"
+          else Fail.fail "uninteresting data"
+
+
+-- Look for MsgAwaitReply
+hackXXX :: BL.ByteString -> Bool
+hackXXX bs =
+    case CBOR.deserialiseFromBytes decodeXXX bs :: Either CBOR.DeserialiseFailure (BL.ByteString, AwaitReply) of
+         Left _ -> False
+         Right (left, _) -> BL.empty == left
+
+
 -- | muxChannel creates a duplex channel for a specific 'MiniProtocolId' and 'MiniProtocolMode'.
 muxChannel :: ( MonadSTM m, MonadSay m, MonadThrow m, Ord ptcl, Enum ptcl, Show ptcl
               , MiniProtocolLimits ptcl, HasCallStack) =>
@@ -183,13 +206,21 @@ muxChannel pmss mid md w cnt =
         blob <- atomically $ do
             let q = ingressQueue (dispatchTable pmss) mid md
             blob <- readTVar q
-            if blob == BL.empty
+            -- Incase of a MsgAwaitReply we wait so that we can deliver MsgRollForward or
+            -- MsgRollBackward in the same blob.
+            let hack = if hackXXX blob
+                           then True
+                           else False
+            if blob == BL.empty || hack
                 then retry
                 else writeTVar q BL.empty >> return blob
         -- say $ printf "recv mid %s mode %s blob len %d" (show mid) (show md) (BL.length blob)
         if BL.null blob
            then pure Nothing
-           else return $ Just blob
+           else do
+               when (BL.length blob == 56) $
+                   say "triggering bug"
+               return $ Just blob
 
 muxBearerSetState :: (MonadSTM m, Ord ptcl, Enum ptcl, Bounded ptcl)
                   => MuxBearer ptcl m

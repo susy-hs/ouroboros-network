@@ -24,6 +24,7 @@ module Ouroboros.Network.Protocol.ChainSync.Client (
     , chainSyncClientPeer
     ) where
 
+import           Control.Monad.Class.MonadSay
 import Network.TypedProtocol.Core
 import Ouroboros.Network.Protocol.ChainSync.Type
 
@@ -103,7 +104,7 @@ data ClientStIntersect header point m a =
 --
 chainSyncClientPeer
   :: forall header point m a .
-     Monad m
+     MonadSay m
   => ChainSyncClient header point m a
   -> Peer (ChainSync header point) AsClient StIdle m a
 chainSyncClientPeer (ChainSyncClient mclient) =
@@ -130,6 +131,7 @@ chainSyncClientPeer (ChainSyncClient mclient) =
           -- to put both roll forward and back under a single constructor.
           MsgAwaitReply ->
             Effect $ do
+              say "and now I deadlock"
               ClientStNext{recvMsgRollForward, recvMsgRollBackward} <- stAwait
               pure $ Await (ServerAgency (TokNext TokMustReply)) $ \resp' ->
                 case resp' of

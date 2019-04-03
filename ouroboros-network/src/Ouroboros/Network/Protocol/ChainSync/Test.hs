@@ -14,6 +14,7 @@ import qualified Control.Monad.ST as ST
 import Data.ByteString.Lazy (ByteString)
 
 import Control.Monad.Class.MonadFork
+import Control.Monad.Class.MonadSay
 import Control.Monad.Class.MonadST
 import Control.Monad.Class.MonadSTM
 import Control.Monad.Class.MonadThrow
@@ -210,7 +211,8 @@ prop_codec_splits3_ChainSync msg =
 
 chainSyncDemo
   :: forall m.
-     ( MonadST m
+     ( MonadSay m
+     , MonadST m
      , MonadSTM m
      , MonadFork m
      , MonadThrow m
