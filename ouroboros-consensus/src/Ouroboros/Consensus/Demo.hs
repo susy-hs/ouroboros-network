@@ -28,7 +28,6 @@ module Ouroboros.Consensus.Demo (
   , HasCreator(..)
   ) where
 
-import           Codec.Serialise (Serialise)
 import           Control.Monad.Except
 import           Data.Either (fromRight)
 import           Data.IntMap.Strict (IntMap)
@@ -90,7 +89,6 @@ type DemoProtocolConstraints p = (
   , HasCreator (Block p)
   , Condense  (Payload p (SimplePreHeader p SimpleBlockMockCrypto))
   , Eq        (Payload p (SimplePreHeader p SimpleBlockMockCrypto))
-  , Serialise (Payload p (SimplePreHeader p SimpleBlockMockCrypto))
   , Show      (Payload p (SimplePreHeader p SimpleBlockMockCrypto))
   )
 

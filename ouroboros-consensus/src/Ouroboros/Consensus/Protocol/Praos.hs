@@ -25,8 +25,8 @@ module Ouroboros.Consensus.Protocol.Praos (
   , Payload(..)
   ) where
 
-import           Codec.CBOR.Encoding (Encoding)
 import           Codec.Serialise (Serialise, encode)
+import           Codec.CBOR.Encoding (Encoding, encodeListLen)
 import           Control.Monad (unless)
 import           Control.Monad.Except (throwError)
 import           Data.IntMap.Strict (IntMap)
@@ -153,7 +153,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
   type SupportedBlock (Praos c) = HasPayload (Praos c)
   type ChainState     (Praos c) = [BlockInfo c]
 
-  mkPayload PraosNodeConfig{..} PraosProof{..} preheader = do
+  mkPayload toEnc PraosNodeConfig{..} PraosProof{..} preheader = do
       keyKES <- getNodeState
       let extraFields = PraosExtraFields {
             praosCreator = praosLeader
@@ -161,6 +161,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
           , praosY       = praosProofY
           }
       m <- signedKES
+        (\(a,b) -> encodeListLen 2 <> toEnc a <> encode b)
         (fromIntegral (unSlotNo praosProofSlot))
         (preheader, extraFields)
         keyKES
@@ -189,7 +190,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
                      }
               else Nothing
 
-  applyChainState cfg@PraosNodeConfig{..} sd b cs = do
+  applyChainState toEnc cfg@PraosNodeConfig{..} sd b cs = do
     let PraosPayload{..} = blockPayload (Proxy :: Proxy (Praos c)) b
         ph               = blockPreHeader b
         slot             = blockSlot b
@@ -208,6 +209,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
 
     -- verify block signature
     unless (verifySignedKES
+                (\(x,y) -> encodeListLen 2 <> toEnc x <> encode y)
                 vkKES
                 (fromIntegral $ unSlotNo slot)
                 (ph, praosExtraFields)
@@ -264,9 +266,6 @@ deriving instance PraosCrypto c => Ord  (Payload (Praos c) ph)
 
 instance PraosCrypto c => Condense (Payload (Praos c) ph) where
     condense (PraosPayload sig _) = condense sig
-
-instance (PraosCrypto c, Serialise ph) => Serialise (Payload (Praos c) ph) where
-  -- use generic instance
 
 slotEpoch :: NodeConfig (Praos c) -> SlotNo -> EpochNo
 slotEpoch PraosNodeConfig{..} s =

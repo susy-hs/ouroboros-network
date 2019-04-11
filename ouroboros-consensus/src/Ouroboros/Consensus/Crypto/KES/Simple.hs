@@ -11,7 +11,6 @@ module Ouroboros.Consensus.Crypto.KES.Simple
     ( SimpleKES
     ) where
 
-import           Codec.Serialise (Serialise)
 import           Control.Monad (replicateM)
 import           Data.Vector (Vector, fromList, (!?))
 import           GHC.Generics (Generic)
@@ -42,31 +41,28 @@ instance DSIGNAlgorithm d => KESAlgorithm (SimpleKES d) where
 
     deriveVerKeyKES (SignKeySimpleKES (vks, _)) = VerKeySimpleKES $ fromList vks
 
-    signKES j a (SignKeySimpleKES (vks, xs)) = case dropWhile (\(k, _) -> k < j) xs of
+    signKES toEnc j a (SignKeySimpleKES (vks, xs)) = case dropWhile (\(k, _) -> k < j) xs of
         []           -> return Nothing
         (_, sk) : ys -> do
-            sig <- signDSIGN a sk
+            sig <- signDSIGN toEnc a sk
             return $ Just (SigSimpleKES sig, SignKeySimpleKES (vks, ys))
 
-    verifyKES (VerKeySimpleKES vks) j a (SigSimpleKES sig) =
+    verifyKES toEnc (VerKeySimpleKES vks) j a (SigSimpleKES sig) =
         case vks !? fromIntegral j of
             Nothing -> False
-            Just vk -> verifyDSIGN vk a sig
+            Just vk -> verifyDSIGN toEnc vk a sig
 
 deriving instance DSIGNAlgorithm d => Show (VerKeyKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Eq (VerKeyKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Ord (VerKeyKES (SimpleKES d))
-deriving instance DSIGNAlgorithm d => Serialise (VerKeyKES (SimpleKES d))
 
 deriving instance DSIGNAlgorithm d => Show (SignKeyKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Eq (SignKeyKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Ord (SignKeyKES (SimpleKES d))
-deriving instance DSIGNAlgorithm d => Serialise (SignKeyKES (SimpleKES d))
 
 deriving instance DSIGNAlgorithm d => Show (SigKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Eq (SigKES (SimpleKES d))
 deriving instance DSIGNAlgorithm d => Ord (SigKES (SimpleKES d))
-deriving instance DSIGNAlgorithm d => Serialise (SigKES (SimpleKES d))
 
 instance Condense (SigDSIGN d) => Condense (SigKES (SimpleKES d)) where
     condense (SigSimpleKES sig) = condense sig

@@ -10,11 +10,10 @@ module Ouroboros.Consensus.Crypto.DSIGN.RSAPSS
     ( RSAPSSDSIGN
     ) where
 
-import           Codec.Serialise (Serialise (..), serialise)
+import           Codec.Serialise (Serialise (..))
 import           Crypto.PubKey.RSA
 import           Crypto.PubKey.RSA.PSS
 import           Data.ByteString (unpack)
-import           Data.ByteString.Lazy (toStrict)
 import           Data.Function (on)
 import           GHC.Generics (Generic)
 import           Text.Printf (printf)
@@ -22,6 +21,7 @@ import           Text.Printf (printf)
 import           Ouroboros.Consensus.Crypto.DSIGN.Class
 import           Ouroboros.Consensus.Crypto.Hash
 import           Ouroboros.Consensus.Util.Condense
+import           Ouroboros.Consensus.Util.Serialise (toBS)
 
 data RSAPSSDSIGN
 
@@ -48,17 +48,17 @@ instance DSIGNAlgorithm RSAPSSDSIGN where
 
     deriveVerKeyDSIGN (SignKeyRSAPSSDSIGN sk) = VerKeyRSAPSSDSIGN $ private_pub sk
 
-    signDSIGN a (SignKeyRSAPSSDSIGN sk) = do
-        esig <- signSafer defaultPSSParamsSHA1 sk (toBS a)
+    signDSIGN toEnc a (SignKeyRSAPSSDSIGN sk) = do
+        esig <- signSafer defaultPSSParamsSHA1 sk (toBS $ toEnc a)
         case esig of
             Left err  -> error $ "signDSIGN: " ++ show err
             Right sig -> return $ SigRSAPSSDSIGN sig
 
-    verifyDSIGN (VerKeyRSAPSSDSIGN vk) a (SigRSAPSSDSIGN sig) =
-        verify defaultPSSParamsSHA1 vk (toBS a) sig
+    verifyDSIGN toEnc (VerKeyRSAPSSDSIGN vk) a (SigRSAPSSDSIGN sig) =
+        verify defaultPSSParamsSHA1 vk (toBS $ toEnc a) sig
 
-toBS :: Serialise a => a -> ByteString
-toBS = toStrict . serialise
+-- toBS :: Serialise a => a -> ByteString
+-- toBS = toStrict . serialise
 
 instance Ord (VerKeyDSIGN RSAPSSDSIGN) where
     compare = compare `on` show

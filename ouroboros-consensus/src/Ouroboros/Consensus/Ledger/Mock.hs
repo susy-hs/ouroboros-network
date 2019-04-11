@@ -291,7 +291,7 @@ forgeBlock :: forall m p c.
            -> IsLeader p
            -> m (SimpleBlock p c)
 forgeBlock cfg curSlot curNo prevHash txs proof = do
-    ouroborosPayload <- mkPayload cfg proof preHeader
+    ouroborosPayload <- mkPayload encode cfg proof preHeader
     return $ SimpleBlock {
         simpleHeader = SimpleHeader preHeader ouroborosPayload
       , simpleBody   = body
@@ -369,11 +369,20 @@ instance (BftCrypto c, SimpleBlockCrypto c')
 -- | Mock ledger is capable of running PBFT, but we simply assume the delegation
 -- map and the protocol parameters can be found statically in the node
 -- configuration.
-instance (PBftCrypto c, SimpleBlockCrypto c')
+instance (PBftCrypto c, SimpleBlockCrypto c'
+         , Serialise
+            (Payload
+                (PBft c)
+                (SimplePreHeader (ExtNodeConfig (PBftLedgerView c) (PBft c)) c'))
+         )
   => ProtocolLedgerView (SimpleBlock (ExtNodeConfig (PBftLedgerView c) (PBft c)) c') where
   protocolLedgerView (EncNodeConfig _ pbftParams) _ls = pbftParams
 
-instance (PraosCrypto c, SimpleBlockCrypto c')
+instance ( PraosCrypto c, SimpleBlockCrypto c'
+         , Serialise
+            (Payload
+                (Praos c) (SimplePreHeader (ExtNodeConfig AddrDist (Praos c)) c'))
+         )
       => ProtocolLedgerView (SimpleBlock (ExtNodeConfig AddrDist (Praos c)) c') where
   protocolLedgerView (EncNodeConfig _ addrDist) (SimpleLedgerState u _) =
       relativeStakes $ totalStakes addrDist u

@@ -19,6 +19,7 @@ import           Ouroboros.Consensus.Crypto.DSIGN.Class
 import           Ouroboros.Consensus.Crypto.Hash
 import           Ouroboros.Consensus.Util.Condense
 import           Ouroboros.Consensus.Util.Random
+import           Ouroboros.Consensus.Util.Serialise (toBS)
 
 data MockDSIGN
 
@@ -37,9 +38,9 @@ instance DSIGNAlgorithm MockDSIGN where
 
     deriveVerKeyDSIGN (SignKeyMockDSIGN n) = VerKeyMockDSIGN n
 
-    signDSIGN a sk = return $ mockSign a sk
+    signDSIGN toEnc a sk = return $ mockSign (toBS $ toEnc a) sk
 
-    verifyDSIGN (VerKeyMockDSIGN n) a s = s == mockSign a (SignKeyMockDSIGN n)
+    verifyDSIGN toEnc (VerKeyMockDSIGN n) a s = s == mockSign (toBS $ toEnc a) (SignKeyMockDSIGN n)
 
 mockSign :: Serialise a => a -> SignKeyDSIGN MockDSIGN -> SigDSIGN MockDSIGN
 mockSign a (SignKeyMockDSIGN n) = SigMockDSIGN (getHash $ hash @ShortHash a) n

@@ -41,17 +41,17 @@ instance KESAlgorithm MockKES where
 
     deriveVerKeyKES (SignKeyMockKES (vk, _, _)) = vk
 
-    signKES j a (SignKeyMockKES (vk, k, t))
+    signKES toEnc j a (SignKeyMockKES (vk, k, t))
         | j >= k && j < t = return $ Just
-            ( SigMockKES (fromHash $ hash @H a) (SignKeyMockKES (vk, j, t))
+            ( SigMockKES (fromHash $ hashWithSerialiser @H toEnc a) (SignKeyMockKES (vk, j, t))
             , SignKeyMockKES (vk, j + 1, t)
             )
         | otherwise       = return Nothing
 
-    verifyKES vk j a (SigMockKES h (SignKeyMockKES (vk', j', _))) =
+    verifyKES toEnc vk j a (SigMockKES h (SignKeyMockKES (vk', j', _))) =
         j == j' &&
         vk == vk' &&
-        fromHash (hash @H a) == h
+        fromHash (hashWithSerialiser @H toEnc a) == h
 
 instance Serialise (SigKES MockKES) where
 
