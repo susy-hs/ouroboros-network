@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PolyKinds #-}
@@ -7,6 +8,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Drivers for running 'Peer's with a 'Codec' and a 'Channel'.
 --
@@ -20,6 +23,7 @@ module Network.TypedProtocol.Driver (
 
   -- * Normal peers
   runPeer,
+  sendRecvDebugTracer,
   TraceSendRecv(..),
 
   -- * Pipelined peers
@@ -41,10 +45,11 @@ import Network.TypedProtocol.Pipelined
 import Network.TypedProtocol.Channel
 import Network.TypedProtocol.Codec
 
+import Control.Monad.Class.MonadSay
 import Control.Monad.Class.MonadSTM
 import Control.Monad.Class.MonadAsync
 import Control.Monad.Class.MonadThrow
-import Control.Tracer (Tracer, traceWith)
+import Control.Tracer (Tracer (..), traceWith)
 
 import Numeric.Natural (Natural)
 
@@ -74,15 +79,29 @@ import Numeric.Natural (Natural)
 -- helpful utility for use in custom drives.
 --
 
-
 --
--- Driver for normal peers
+-- Tracing
 --
 
 -- | Structured 'Tracer' output for 'runPeer' and derivitives.
 --
 data TraceSendRecv ps = TraceSendMsg (AnyMessage ps)
                       | TraceRecvMsg (AnyMessage ps)
+
+-- requires UndecidableInstances extension
+instance Show (AnyMessage ps) => Show (TraceSendRecv ps) where
+  show (TraceSendMsg msg) = "Send " ++ show msg
+  show (TraceRecvMsg msg) = "Recv " ++ show msg
+
+-- |
+-- Tracer for @TraceSendRecv@.
+sendRecvDebugTracer :: (MonadSay m, Show (AnyMessage ps))
+                    => Tracer m (TraceSendRecv ps)
+sendRecvDebugTracer = Tracer (say . show)
+
+--
+-- Driver for normal peers
+--
 
 -- | Run a peer with the given channel via the given codec.
 --
