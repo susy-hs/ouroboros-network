@@ -81,7 +81,7 @@ deriving instance PraosCrypto c => Eq   (PraosExtraFields c)
 deriving instance PraosCrypto c => Ord  (PraosExtraFields c)
 
 instance VRFAlgorithm (PraosVRF c) => Serialise (PraosExtraFields c)
-  -- use Generic instance for now
+  -- Use Generic instance for now
 
 data PraosProof c = PraosProof {
       praosProofRho  :: CertifiedVRF (PraosVRF c) (HList [Natural, SlotNo, VRFType])
@@ -127,7 +127,7 @@ data PraosParams = PraosParams {
     , praosLifetimeKES   :: Natural
     }
 
-instance PraosCrypto c => OuroborosTag (Praos c) where
+instance (Serialise (PraosExtraFields c), PraosCrypto c) => OuroborosTag (Praos c) where
 
   data Payload (Praos c) ph = PraosPayload {
         praosSignature   :: SignedKES (PraosKES c) (ph, PraosExtraFields c)
@@ -179,8 +179,8 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
         RelayId _  -> return Nothing
         CoreId nid -> do
           let (rho', y', t) = rhoYT cfg cs slot nid
-          rho <- evalCertified rho' praosSignKeyVRF
-          y   <- evalCertified y'   praosSignKeyVRF
+          rho <- evalCertified encode rho' praosSignKeyVRF
+          y   <- evalCertified encode y'   praosSignKeyVRF
           return $ if fromIntegral (certifiedNatural y) < t
               then Just PraosProof {
                        praosProofRho  = rho
@@ -221,7 +221,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
         y             = praosY   praosExtraFields
 
     -- verify rho proof
-    unless (verifyCertified vkVRF rho' rho) $
+    unless (verifyCertified encode vkVRF rho' rho) $
         throwError $ PraosInvalidCert
             vkVRF
             (encode rho')
@@ -229,7 +229,7 @@ instance PraosCrypto c => OuroborosTag (Praos c) where
             (certifiedProof rho)
 
     -- verify y proof
-    unless (verifyCertified vkVRF y' y) $
+    unless (verifyCertified encode vkVRF y' y) $
         throwError $ PraosInvalidCert
             vkVRF
             (encode y')
@@ -285,7 +285,7 @@ infosSlice :: SlotNo -> SlotNo -> [BlockInfo c] -> [BlockInfo c]
 infosSlice from to xs = takeWhile (\b -> biSlot b >= from)
                       $ dropWhile (\b -> biSlot b > to) xs
 
-infosEta :: forall c. PraosCrypto c
+infosEta :: forall c. (PraosCrypto c)
          => NodeConfig (Praos c)
          -> [BlockInfo c]
          -> EpochNo
