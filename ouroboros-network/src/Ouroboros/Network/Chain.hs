@@ -71,7 +71,7 @@ module Ouroboros.Network.Chain (
 import           Prelude hiding (drop, head, length, null)
 
 import           Codec.CBOR.Decoding (decodeListLen)
-import           Codec.CBOR.Encoding (encodeListLen)
+import           Codec.CBOR.Encoding (Encoding, encodeListLen)
 import           Codec.Serialise (Serialise (..))
 import           Control.Exception (assert)
 import qualified Data.List as L
@@ -110,29 +110,29 @@ genesisBlockNo = BlockNo 0
 genesisPoint :: Point block
 genesisPoint = Point genesisSlotNo GenesisHash
 
-valid :: HasHeader block => Chain block -> Bool
-valid Genesis  = True
-valid (c :> b) = valid c && validExtension c b
+valid :: HasHeader block => (block -> Encoding) -> Chain block -> Bool
+valid _ Genesis  = True
+valid toEnc (c :> b) = valid toEnc c && validExtension toEnc c b
 
-validExtension ::  HasHeader block => Chain block -> block -> Bool
-validExtension c b = blockInvariant b
-                  && headHash c == blockPrevHash b
-                  && headSlot c <  blockSlot b
+validExtension ::  HasHeader block => (block -> Encoding) -> Chain block -> block -> Bool
+validExtension toEnc c b = blockInvariant b
+                  && headHash toEnc c == blockPrevHash b
+                  && headSlot toEnc c <  blockSlot b
                   && headBlockNo c == pred (blockNo b)
 
 head :: Chain b -> Maybe b
 head Genesis  = Nothing
 head (_ :> b) = Just b
 
-headPoint :: HasHeader block => Chain block -> Point block
-headPoint Genesis  = genesisPoint
-headPoint (_ :> b) = blockPoint b
+headPoint :: HasHeader block => (block -> Encoding) -> Chain block -> Point block
+headPoint _ Genesis  = genesisPoint
+headPoint toEnc (_ :> b) = blockPoint toEnc b
 
-headSlot :: HasHeader block => Chain block -> SlotNo
-headSlot = pointSlot . headPoint
+headSlot :: HasHeader block => (block -> Encoding) -> Chain block -> SlotNo
+headSlot toEnc = pointSlot . headPoint toEnc
 
-headHash :: HasHeader block => Chain block -> ChainHash block
-headHash = pointHash . headPoint
+headHash :: HasHeader block => (block -> Encoding) -> Chain block -> ChainHash block
+headHash toEnc = pointHash . headPoint toEnc
 
 headBlockNo :: HasHeader block => Chain block -> BlockNo
 headBlockNo Genesis  = genesisBlockNo
@@ -150,14 +150,14 @@ toOldestFirst = reverse . toNewestFirst
 -- | Make a chain from a list of blocks. The head of the list is the head
 -- of the chain.
 --
-fromNewestFirst :: HasHeader block => [block] -> Chain block
-fromNewestFirst bs = assert (valid c) c
+fromNewestFirst :: HasHeader block => (block -> Encoding) -> [block] -> Chain block
+fromNewestFirst toEnc bs = assert (valid toEnc c) c
   where
     c = foldr (flip (:>)) Genesis bs
 
 -- | Construct chain from list of blocks from oldest to newest
-fromOldestFirst :: HasHeader block => [block] -> Chain block
-fromOldestFirst bs = assert (valid c) c
+fromOldestFirst :: HasHeader block => (block -> Encoding) -> [block] -> Chain block
+fromOldestFirst toEnc bs = assert (valid toEnc c) c
   where
     c = L.foldl' (:>) Genesis bs
 
@@ -173,28 +173,27 @@ null :: Chain block -> Bool
 null Genesis = True
 null _       = False
 
-addBlock :: HasHeader block => block -> Chain block -> Chain block
-addBlock b c = assert (validExtension c b) $
-               c :> b
+addBlock :: HasHeader block => (block -> Encoding) -> block -> Chain block -> Chain block
+addBlock toEnc b c = assert (validExtension toEnc c b) $ c :> b
 
-pointOnChain :: HasHeader block => Point block -> Chain block -> Bool
-pointOnChain p Genesis        = p == genesisPoint
-pointOnChain p (c :> b)
+pointOnChain :: HasHeader block => (block -> Encoding) -> Point block -> Chain block -> Bool
+pointOnChain _ p Genesis        = p == genesisPoint
+pointOnChain toEnc p (c :> b)
   | pointSlot p >  blockSlot b = False
-  | pointSlot p == blockSlot b = pointHash p == BlockHash (blockHash b)
-  | otherwise                  = pointOnChain p c
+  | pointSlot p == blockSlot b = pointHash p == BlockHash (blockHash toEnc b)
+  | otherwise                  = pointOnChain toEnc p c
 
-rollback :: HasHeader block => Point block -> Chain block -> Maybe (Chain block)
-rollback p (c :> b) | blockPoint b == p = Just (c :> b)
-                    | otherwise         = rollback p c
-rollback p Genesis  | p == genesisPoint = Just Genesis
-                    | otherwise         = Nothing
+rollback :: HasHeader block => (block -> Encoding) -> Point block -> Chain block -> Maybe (Chain block)
+rollback toEnc p (c :> b) | blockPoint toEnc b == p = Just (c :> b)
+                          | otherwise         = rollback toEnc p c
+rollback _ p Genesis  | p == genesisPoint = Just Genesis
+                      | otherwise         = Nothing
 
-successorBlock :: HasHeader block => Point block -> Chain block -> Maybe block
-successorBlock p c0 | headPoint c0 == p = Nothing
-successorBlock p c0 = go c0
+successorBlock :: HasHeader block => (block -> Encoding) -> Point block -> Chain block -> Maybe block
+successorBlock toEnc p c0 | headPoint toEnc c0 == p = Nothing
+successorBlock toEnc p c0 = go c0
   where
-    go (c :> b' :> b) | blockPoint b' == p = Just b
+    go (c :> b' :> b) | blockPoint toEnc b' == p = Just b
                       | otherwise          = go (c :> b')
     go (Genesis :> b) | p == genesisPoint  = Just b
     go _ = error "successorBlock: point not on chain"
@@ -224,18 +223,20 @@ a `isPrefixOf` b = reverse (toNewestFirst a) `L.isPrefixOf` reverse (toNewestFir
 
 
 applyChainUpdate :: HasHeader block
-                 => ChainUpdate block
+                 => (block -> Encoding)
+                 -> ChainUpdate block
                  -> Chain block
                  -> Maybe (Chain block)
-applyChainUpdate (AddBlock b) c = Just (addBlock b c)
-applyChainUpdate (RollBack p) c =       rollback p c
+applyChainUpdate toEnc (AddBlock b) c = Just (addBlock toEnc b c)
+applyChainUpdate toEnc (RollBack p) c =       rollback toEnc p c
 
 applyChainUpdates :: HasHeader block
-                  => [ChainUpdate block]
+                  => (block -> Encoding)
+                  -> [ChainUpdate block]
                   -> Chain block
                   -> Maybe (Chain block)
-applyChainUpdates []     c = Just c
-applyChainUpdates (u:us) c = applyChainUpdates us =<< applyChainUpdate u c
+applyChainUpdates _ []     c = Just c
+applyChainUpdates toEnc (u:us) c = applyChainUpdates toEnc us =<< applyChainUpdate toEnc u c
 
 -- | Select a bunch of 'Point's based on offsets from the head of the chain.
 -- This is used in the chain consumer protocol as part of finding the
@@ -246,14 +247,14 @@ applyChainUpdates (u:us) c = applyChainUpdates us =<< applyChainUpdate u c
 --
 -- > selectPoints (0 : [ fib n | n <- [1 .. 17] ])
 --
-selectPoints :: HasHeader block => [Int] -> Chain block -> [Point block]
-selectPoints offsets =
+selectPoints :: HasHeader block => (block -> Encoding) -> [Int] -> Chain block -> [Point block]
+selectPoints toEnc offsets =
     go relativeOffsets
   where
     relativeOffsets = zipWith (-) offsets (0:offsets)
     go [] _         = []
     go _  Genesis   = []
-    go (off:offs) c = headPoint c' : go offs c'
+    go (off:offs) c = headPoint toEnc c' : go offs c'
       where
         c' = drop off c
 
@@ -267,17 +268,18 @@ findBlock p (c :> b)
   | otherwise        = findBlock p c
 
 selectBlockRange :: HasHeader block
-                 => Chain block
+                 => (block -> Encoding)
+                 -> Chain block
                  -> Point block
                  -> Point block
                  -> Maybe [block]
-selectBlockRange c from to
-  | pointOnChain from c
-  , pointOnChain to c
+selectBlockRange toEnc c from to
+  | pointOnChain toEnc from c
+  , pointOnChain toEnc to c
   =   Just
     . reverse
-    . takeWhile (\b -> blockPoint b /= from)
-    . dropWhile (\b -> blockPoint b /= to)
+    . takeWhile (\b -> blockPoint toEnc b /= from)
+    . dropWhile (\b -> blockPoint toEnc b /= to)
     . toNewestFirst
     $ c
 
@@ -286,25 +288,27 @@ selectBlockRange c from to
 
 findFirstPoint
   :: HasHeader block
-  => [Point block]
+  => (block -> Encoding)
+  -> [Point block]
   -> Chain block
   -> Maybe (Point block)
-findFirstPoint [] _     = Nothing
-findFirstPoint (p:ps) c
-  | pointOnChain p c    = Just p
-  | otherwise           = findFirstPoint ps c
+findFirstPoint _ [] _     = Nothing
+findFirstPoint toEnc (p:ps) c
+  | pointOnChain toEnc p c    = Just p
+  | otherwise                 = findFirstPoint toEnc ps c
 
 intersectChains
   :: HasHeader block
-  => Chain block
+  => (block -> Encoding)
+  -> Chain block
   -> Chain block
   -> Maybe (Point block)
-intersectChains _ Genesis   = Nothing
-intersectChains c (bs :> b) =
-  let p = blockPoint b
-  in if pointOnChain (blockPoint b) c
+intersectChains _ _ Genesis   = Nothing
+intersectChains toEnc c (bs :> b) =
+  let p = blockPoint toEnc b
+  in if pointOnChain toEnc (blockPoint toEnc b) c
        then Just p
-       else intersectChains c bs
+       else intersectChains toEnc c bs
 
 
 

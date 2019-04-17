@@ -59,7 +59,7 @@ class (StandardHash b, Measured BlockMeasure b, Typeable b) => HasHeader b where
     -- network layer tests).
     type HeaderHash b :: *
 
-    blockHash      :: b -> HeaderHash b
+    blockHash      :: (b -> Encoding) -> b -> HeaderHash b
     blockPrevHash  :: b -> ChainHash b
     blockSlot      :: b -> SlotNo
     blockNo        :: b -> BlockNo
@@ -125,11 +125,11 @@ data Point block = Point {
 castPoint :: (HeaderHash a ~ HeaderHash b) => Point a -> Point b
 castPoint (Point a b) = Point a (castHash b)
 
-blockPoint :: HasHeader block => block -> Point block
-blockPoint b =
+blockPoint :: HasHeader block => (block -> Encoding) -> block -> Point block
+blockPoint toEnc b =
     Point {
       pointSlot = blockSlot b,
-      pointHash = BlockHash (blockHash b)
+      pointHash = BlockHash (blockHash toEnc b)
     }
 
 {-------------------------------------------------------------------------------

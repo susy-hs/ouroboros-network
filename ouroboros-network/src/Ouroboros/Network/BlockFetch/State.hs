@@ -18,6 +18,7 @@ import           Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import           Data.Void
 
+import           Codec.CBOR.Encoding (Encoding)
 import           Control.Monad.Class.MonadSTM
 import           Control.Exception (assert)
 import           Control.Tracer (Tracer, traceWith)
@@ -49,12 +50,14 @@ fetchLogicIterations
   :: (MonadSTM m, Ord peer,
       HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block)
-  => Tracer m [FetchDecision [Point header]]
+  => (header -> Encoding)
+  -> Tracer m [FetchDecision [Point header]]
   -> FetchDecisionPolicy header block
   -> FetchTriggerVariables peer header block m
   -> FetchNonTriggerVariables peer header block m
   -> m Void
-fetchLogicIterations decisionTracer
+fetchLogicIterations toEnc
+                     decisionTracer
                      fetchDecisionPolicy
                      fetchTriggerVariables
                      fetchNonTriggerVariables =
@@ -67,6 +70,7 @@ fetchLogicIterations decisionTracer
       -- + act on those decisions
 
       fetchLogicIteration
+        toEnc
         decisionTracer
         fetchDecisionPolicy
         fetchTriggerVariables
@@ -90,13 +94,15 @@ fetchLogicIteration
   :: (MonadSTM m, Ord peer,
       HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block)
-  => Tracer m [FetchDecision [Point header]]
+  => (header -> Encoding)
+  -> Tracer m [FetchDecision [Point header]]
   -> FetchDecisionPolicy header block
   -> FetchTriggerVariables peer header block m
   -> FetchNonTriggerVariables peer header block m
   -> FetchStateFingerprint peer header block
   -> m (FetchStateFingerprint peer header block)
-fetchLogicIteration decisionTracer
+fetchLogicIteration toEnc
+                    decisionTracer
                     fetchDecisionPolicy
                     fetchTriggerVariables
                     fetchNonTriggerVariables
@@ -118,6 +124,7 @@ fetchLogicIteration decisionTracer
 
     -- Make all the fetch decisions
     let decisions = fetchDecisionsForStateSnapshot
+                      toEnc
                       fetchDecisionPolicy
                       stateSnapshot
 
@@ -125,7 +132,7 @@ fetchLogicIteration decisionTracer
     -- _ <- evaluate (force decisions)
 
     -- Trace the batch of fetch decisions
-    traceWith decisionTracer (map (fmap fetchRequestPoints . fst) decisions)
+    traceWith decisionTracer (map (fmap (fetchRequestPoints toEnc) . fst) decisions)
 
     -- Tell the fetch clients to act on our decisions
     fetchLogicIterationAct (map swizzleReqVar decisions)
@@ -134,10 +141,10 @@ fetchLogicIteration decisionTracer
   where
     swizzleReqVar (d,(_,_,_,rq)) = (d,rq)
 
-    fetchRequestPoints :: HasHeader hdr => FetchRequest hdr -> [Point hdr]
-    fetchRequestPoints (FetchRequest headerss) =
+    fetchRequestPoints :: HasHeader hdr => (hdr -> Encoding) -> FetchRequest hdr -> [Point hdr]
+    fetchRequestPoints toEncH (FetchRequest headerss) =
       -- Flatten multiple fragments and trace points, not full headers
-      [ blockPoint header
+      [ blockPoint toEncH header
       | headers <- headerss
       , header  <- headers ]
 
@@ -148,13 +155,15 @@ fetchDecisionsForStateSnapshot
   :: (HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block,
       Ord peer)
-  => FetchDecisionPolicy header block
+  => (block -> Encoding)
+  -> FetchDecisionPolicy header block
   -> FetchStateSnapshot peer header block m
   -> [( FetchDecision (FetchRequest header),
         PeerInfo header (TFetchRequestVar m header)
       )]
 
 fetchDecisionsForStateSnapshot
+    toEnc
     fetchDecisionPolicy
     FetchStateSnapshot {
       fetchStateCurrentChain,
@@ -175,6 +184,7 @@ fetchDecisionsForStateSnapshot
          == Map.keysSet fetchStatePeerReqVars) $
 
     fetchDecisions
+      toEnc
       fetchDecisionPolicy
       fetchStateFetchMode
       fetchStateCurrentChain
@@ -311,4 +321,3 @@ readStateVariables FetchTriggerVariables{..}
           }
 
     return (fetchStateSnapshot, fetchStateFingerprint')
-

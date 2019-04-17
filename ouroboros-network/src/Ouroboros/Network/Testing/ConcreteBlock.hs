@@ -161,7 +161,7 @@ instance Measured BlockMeasure Block where
 instance HasHeader BlockHeader where
     type HeaderHash BlockHeader = ConcreteHeaderHash
 
-    blockHash      = headerHash
+    blockHash      = const headerHash
     blockPrevHash  = headerPrevHash
     blockSlot      = headerSlot
     blockNo        = headerBlockNo
@@ -173,7 +173,7 @@ instance HasHeader BlockHeader where
 instance HasHeader Block where
     type HeaderHash Block = ConcreteHeaderHash
 
-    blockHash      =            headerHash     . blockHeader
+    blockHash      = const $ headerHash     . blockHeader
     blockPrevHash  = castHash . headerPrevHash . blockHeader
     blockSlot      =            headerSlot     . blockHeader
     blockNo        =            headerBlockNo  . blockHeader

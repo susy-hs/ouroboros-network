@@ -7,6 +7,7 @@ import           Ouroboros.Network.Chain (Chain, ChainUpdate (..), HasHeader,
                      Point (..), blockPoint, genesisPoint, pointOnChain)
 import qualified Ouroboros.Network.Chain as Chain
 
+import           Codec.CBOR.Encoding (Encoding)
 import           Control.Exception (assert)
 import           Data.List (find, group, sort)
 import           Data.Maybe (fromMaybe)
@@ -84,14 +85,14 @@ data ReaderNext = ReaderBackTo | ReaderForwardFrom
 -- Invariant
 --
 
-invChainProducerState :: HasHeader block => ChainProducerState block -> Bool
-invChainProducerState (ChainProducerState c rs) =
-    Chain.valid c
- && invReaderStates c rs
+invChainProducerState :: HasHeader block => (block -> Encoding) -> ChainProducerState block -> Bool
+invChainProducerState toEnc (ChainProducerState c rs) =
+    Chain.valid toEnc c
+ && invReaderStates toEnc c rs
 
-invReaderStates :: HasHeader block => Chain block -> ReaderStates block -> Bool
-invReaderStates c rs =
-    and [ pointOnChain readerPoint c | ReaderState{readerPoint} <- rs ]
+invReaderStates :: HasHeader block => (block -> Encoding) -> Chain block -> ReaderStates block -> Bool
+invReaderStates toEnc c rs =
+    and [ pointOnChain toEnc readerPoint c | ReaderState{readerPoint} <- rs ]
  && noDuplicates [ readerId | ReaderState{readerId} <- rs ]
 
 noDuplicates :: Ord a => [a] -> Bool
@@ -127,21 +128,23 @@ producerChain :: ChainProducerState block -> Chain block
 producerChain (ChainProducerState c _) = c
 
 findFirstPoint :: HasHeader block
-               => [Point block]
+               => (block -> Encoding)
+               -> [Point block]
                -> ChainProducerState block
                -> Maybe (Point block)
-findFirstPoint ps = Chain.findFirstPoint ps . producerChain
+findFirstPoint toEnc ps = Chain.findFirstPoint toEnc ps . producerChain
 
 
 -- | Add a new reader with the given intersection point and return the new
 -- 'ReaderId'.
 --
 initReader :: HasHeader block
-           => Point block
+           => (block -> Encoding)
+           -> Point block
            -> ChainProducerState block
            -> (ChainProducerState block, ReaderId)
-initReader point (ChainProducerState c rs) =
-    assert (pointOnChain point c) $
+initReader toEnc point (ChainProducerState c rs) =
+    assert (pointOnChain toEnc point c) $
     (ChainProducerState c (r:rs), readerId r)
   where
     r = ReaderState {
@@ -163,12 +166,13 @@ deleteReader rid (ChainProducerState c rs) =
 -- the 'ReaderBackTo' state.
 --
 updateReader :: HasHeader block
-             => ReaderId
+             => (block -> Encoding)
+             -> ReaderId
              -> Point block    -- ^ new reader intersection point
              -> ChainProducerState block
              -> ChainProducerState block
-updateReader rid point (ChainProducerState c rs) =
-    assert (pointOnChain point c) $
+updateReader toEnc rid point (ChainProducerState c rs) =
+    assert (pointOnChain toEnc point c) $
     ChainProducerState c (map update rs)
   where
     update r | readerId r == rid = r { readerPoint = point,
@@ -181,16 +185,17 @@ updateReader rid point (ChainProducerState c rs) =
 -- `ReaderBackTo` state, otherwise preserve reader state.
 --
 switchFork :: HasHeader block
-           => Chain block
+           => (block -> Encoding)
+           -> Chain block
            -> ChainProducerState block
            -> ChainProducerState block
-switchFork c (ChainProducerState c' rs) =
+switchFork toEnc c (ChainProducerState c' rs) =
     ChainProducerState c (map update rs)
   where
-    ipoint = fromMaybe genesisPoint $ Chain.intersectChains c c'
+    ipoint = fromMaybe genesisPoint $ Chain.intersectChains toEnc c c'
 
     update r@ReaderState{readerPoint} =
-      if pointOnChain readerPoint c
+      if pointOnChain toEnc readerPoint c
         then r
         else r { readerPoint = ipoint, readerNext = ReaderBackTo }
 
@@ -200,15 +205,16 @@ switchFork c (ChainProducerState c' rs) =
 -- the producer's state assuming that the reader follows its instruction.
 --
 readerInstruction :: HasHeader block
-                  => ReaderId
+                  => (block -> Encoding)
+                  -> ReaderId
                   -> ChainProducerState block
                   -> Maybe (ChainUpdate block, ChainProducerState block)
-readerInstruction rid cps@(ChainProducerState c rs) =
+readerInstruction toEnc rid cps@(ChainProducerState c rs) =
     let ReaderState {readerPoint, readerNext} = lookupReader cps rid in
     case readerNext of
       ReaderForwardFrom ->
-          assert (pointOnChain readerPoint c) $
-          case Chain.successorBlock readerPoint c of
+          assert (pointOnChain toEnc readerPoint c) $
+          case Chain.successorBlock toEnc readerPoint c of
             -- There is no successor block because the reader is at the head
             Nothing -> Nothing
 
@@ -216,7 +222,7 @@ readerInstruction rid cps@(ChainProducerState c rs) =
               where
                 cps' = ChainProducerState c (map setPoint rs)
                 setPoint r
-                  | readerId r == rid = r { readerPoint = blockPoint b }
+                  | readerId r == rid = r { readerPoint = blockPoint toEnc b }
                   | otherwise         = r
 
       ReaderBackTo -> Just (RollBack readerPoint, cps')
@@ -230,22 +236,24 @@ readerInstruction rid cps@(ChainProducerState c rs) =
 -- | Add a block to the chain. It does not require any reader's state changes.
 --
 addBlock :: HasHeader block
-         => block
+         => (block -> Encoding)
+         -> block
          -> ChainProducerState block
          -> ChainProducerState block
-addBlock b (ChainProducerState c rs) =
-    ChainProducerState (Chain.addBlock b c) rs
+addBlock toEnc b (ChainProducerState c rs) =
+    ChainProducerState (Chain.addBlock toEnc b c) rs
 
 
 -- | Rollback producer chain. It requires to update reader states, since some
 -- @'readerPoint'@s may not be on the new chain; in this case find intersection
 -- of the two chains and set @'readerNext'@ to @'ReaderBackTo'@.
 rollback :: HasHeader block
-         => Point block
+         => (block -> Encoding)
+         -> Point block
          -> ChainProducerState block
          -> Maybe (ChainProducerState block)
-rollback p (ChainProducerState c rs) =
-    ChainProducerState <$> Chain.rollback p c
+rollback toEnc p (ChainProducerState c rs) =
+    ChainProducerState <$> Chain.rollback toEnc p c
                        <*> pure rs'
   where
     rs' = [ if pointSlot p' > pointSlot p
@@ -257,21 +265,23 @@ rollback p (ChainProducerState c rs) =
 -- | Convenient function which combines both @'addBlock'@ and @'rollback'@.
 --
 applyChainUpdate :: HasHeader block
-                 => ChainUpdate block
+                 => (block -> Encoding)
+                 -> ChainUpdate block
                  -> ChainProducerState block
                  -> Maybe (ChainProducerState block)
-applyChainUpdate (AddBlock b) c = Just (addBlock b c)
-applyChainUpdate (RollBack p) c =       rollback p c
+applyChainUpdate toEnc (AddBlock b) c = Just (addBlock toEnc b c)
+applyChainUpdate toEnc (RollBack p) c =       rollback toEnc p c
 
 
 -- | Apply a list of @'ChainUpdate'@s.
 --
 applyChainUpdates :: HasHeader block
-                  => [ChainUpdate block]
+                  => (block -> Encoding)
+                  -> [ChainUpdate block]
                   -> ChainProducerState block
                   -> Maybe (ChainProducerState block)
-applyChainUpdates []     c = Just c
-applyChainUpdates (u:us) c = applyChainUpdates us =<< applyChainUpdate u c
+applyChainUpdates _ []     c = Just c
+applyChainUpdates toEnc (u:us) c = applyChainUpdates toEnc us =<< applyChainUpdate toEnc u c
 
 
 --

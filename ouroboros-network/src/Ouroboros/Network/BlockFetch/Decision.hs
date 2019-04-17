@@ -24,6 +24,7 @@ module Ouroboros.Network.BlockFetch.Decision (
 
 import qualified Data.Set as Set
 
+import           Codec.CBOR.Encoding (Encoding)
 import           Control.Exception (assert)
 import           Control.Monad (guard)
 
@@ -120,13 +121,16 @@ type CandidateFragments header = (ChainSuffix header, [ChainFragment header])
 fetchDecisions
   :: (HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block)
-  => FetchDecisionPolicy header block
+  => (block -> Encoding)
+  -> (header -> Encoding)
+  -> FetchDecisionPolicy header block
   -> FetchMode
   -> AnchoredFragment block
   -> (Point block -> Bool)
   -> [(AnchoredFragment header, PeerInfo header extra)]
   -> [(FetchDecision (FetchRequest header), PeerInfo header extra)]
-fetchDecisions fetchDecisionPolicy@FetchDecisionPolicy {
+fetchDecisions toEncB toEncH
+               fetchDecisionPolicy@FetchDecisionPolicy {
                  plausibleCandidateChain,
                  compareCandidateChains,
                  blockFetchSize
@@ -142,7 +146,7 @@ fetchDecisions fetchDecisionPolicy@FetchDecisionPolicy {
   . map swizzleSIG
 
     -- Filter to keep blocks that are not already in-flight with other peers.
-  . filterNotAlreadyInFlightWithOtherPeers
+  . filterNotAlreadyInFlightWithOtherPeers toEncH
       fetchMode
   . map swizzleSI
 
@@ -153,15 +157,15 @@ fetchDecisions fetchDecisionPolicy@FetchDecisionPolicy {
   . map swizzleIG
 
     -- Filter to keep blocks that are not already in-flight for this peer.
-  . filterNotAlreadyInFlightWithPeer
+  . filterNotAlreadyInFlightWithPeer toEncH
   . map swizzleI
 
     -- Filter to keep blocks that have not already been downloaded.
-  . filterNotAlreadyFetched
+  . filterNotAlreadyFetched toEncH
       fetchedBlocks
 
     -- Select the suffix up to the intersection with the current chain.
-  . selectForkSuffixes
+  . selectForkSuffixes toEncB toEncH
       currentChain
 
     -- First, filter to keep chains the consensus layer tells us are plausible.
@@ -372,11 +376,13 @@ interested in this candidate at all.
 chainForkSuffix
   :: (HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block)
-  => AnchoredFragment block  -- ^ Current chain.
+  => (block -> Encoding)
+  -> (header -> Encoding)
+  -> AnchoredFragment block  -- ^ Current chain.
   -> AnchoredFragment header -- ^ Candidate chain
   -> Maybe (ChainSuffix header)
-chainForkSuffix current candidate =
-    case AnchoredFragment.intersect current candidate of
+chainForkSuffix toEnc1 toEnc2 current candidate =
+    case AnchoredFragment.intersect toEnc1 toEnc2 current candidate of
       Nothing                         -> Nothing
       Just (_, _, _, candidateSuffix) ->
         -- If the suffix is empty, it means the candidate chain was equal to
@@ -388,15 +394,17 @@ chainForkSuffix current candidate =
 selectForkSuffixes
   :: (HasHeader header, HasHeader block,
       HeaderHash header ~ HeaderHash block)
-  => AnchoredFragment block
+  => (block -> Encoding)
+  -> (header -> Encoding)
+  -> AnchoredFragment block
   -> [(FetchDecision (AnchoredFragment header), peerinfo)]
   -> [(FetchDecision (ChainSuffix      header), peerinfo)]
-selectForkSuffixes current chains =
+selectForkSuffixes toEnc1 toEnc2 current chains =
     [ (mchain', peer)
     | (mchain,  peer) <- chains
     , let mchain' = do
             chain <- mchain
-            chainForkSuffix current chain ?! FetchDeclineChainNoIntersection
+            chainForkSuffix toEnc1 toEnc2 current chain ?! FetchDeclineChainNoIntersection
     ]
 
 {-
@@ -440,10 +448,11 @@ of individual blocks without their relationship to each other.
 --
 filterNotAlreadyFetched
   :: (HasHeader header, HeaderHash header ~ HeaderHash block)
-  => (Point block -> Bool)
+  => (header -> Encoding)
+  -> (Point block -> Bool)
   -> [(FetchDecision (ChainSuffix        header), peerinfo)]
   -> [(FetchDecision (CandidateFragments header), peerinfo)]
-filterNotAlreadyFetched alreadyDownloaded chains =
+filterNotAlreadyFetched toEnc alreadyDownloaded chains =
     [ (mcandidates, peer)
     | (mcandidate,  peer) <- chains
     , let mcandidates = do
@@ -456,15 +465,16 @@ filterNotAlreadyFetched alreadyDownloaded chains =
             return (candidate, fragments)
     ]
   where
-    notAlreadyFetched = not . alreadyDownloaded . castPoint . blockPoint
+    notAlreadyFetched = not . alreadyDownloaded . castPoint . blockPoint toEnc
 
 
 filterNotAlreadyInFlightWithPeer
   :: HasHeader header
-  => [(FetchDecision (CandidateFragments header), PeerFetchInFlight header,
+  => (header -> Encoding)
+  -> [(FetchDecision (CandidateFragments header), PeerFetchInFlight header,
                                                   peerinfo)]
   -> [(FetchDecision (CandidateFragments header), peerinfo)]
-filterNotAlreadyInFlightWithPeer chains =
+filterNotAlreadyInFlightWithPeer toEnc chains =
     [ (mcandidatefragments',          peer)
     | (mcandidatefragments, inflight, peer) <- chains
     , let mcandidatefragments' = do
@@ -477,7 +487,7 @@ filterNotAlreadyInFlightWithPeer chains =
     ]
   where
     notAlreadyInFlight inflight b =
-      blockPoint b `Set.notMember` peerFetchBlocksInFlight inflight
+      blockPoint toEnc b `Set.notMember` peerFetchBlocksInFlight inflight
 
 
 -- One last step of filtering, but this time across peers, rather than
@@ -486,17 +496,18 @@ filterNotAlreadyInFlightWithPeer chains =
 -- peers.
 filterNotAlreadyInFlightWithOtherPeers
   :: HasHeader header
-  => FetchMode
+  => (header -> Encoding)
+  -> FetchMode
   -> [(FetchDecision [ChainFragment header], PeerFetchStatus header,
                                              PeerFetchInFlight header,
                                              peer)]
   -> [(FetchDecision [ChainFragment header], peer)]
 
-filterNotAlreadyInFlightWithOtherPeers FetchModeDeadline chains =
+filterNotAlreadyInFlightWithOtherPeers _ FetchModeDeadline chains =
     [ (mchainfragments,       peer)
     | (mchainfragments, _, _, peer) <- chains ]
 
-filterNotAlreadyInFlightWithOtherPeers FetchModeBulkSync chains =
+filterNotAlreadyInFlightWithOtherPeers toEnc FetchModeBulkSync chains =
     go Set.empty chains
   where
     go !_ [] = []
@@ -514,7 +525,7 @@ filterNotAlreadyInFlightWithOtherPeers FetchModeBulkSync chains =
           return fragments
 
         notAlreadyInFlight b =
-          blockPoint b `Set.notMember` blocksInFlightWithOtherPeers
+          blockPoint toEnc b `Set.notMember` blocksInFlightWithOtherPeers
 
         blocksInFlightWithOtherPeers' = case status of
           PeerFetchStatusShutdown -> blocksInFlightWithOtherPeers
@@ -681,7 +692,7 @@ fetchRequestDecision FetchDecisionPolicy {
               fetchFragments
 
 
--- | 
+-- |
 --
 -- Precondition: The result will be non-empty if
 --
@@ -723,4 +734,3 @@ selectBlocksUpToLimits blockFetchSize nreqs0 maxreqs nbytes0 maxbytes fragments 
       -- Note that we always pick the one last block that crosses the maxbytes
       -- limit. This cover the case where we otherwise wouldn't even be able to
       -- request a single block, as it's too large.
-

@@ -4,12 +4,13 @@
 {-# LANGUAGE ViewPatterns        #-}
 module Ouroboros.Network.AnchoredFragment (
   -- * AnchoredFragment type and fundamental operations
-  AnchoredFragment(Empty, (:>), (:<)),
+  AnchoredFragment(Empty, (:>)),
   anchorPoint,
   unanchorFragment,
   mkAnchoredFragment,
   valid,
   validExtension,
+  viewLeft,
 
   -- ** Block re-exports
   HasHeader(..),
@@ -70,6 +71,7 @@ module Ouroboros.Network.AnchoredFragment (
 
 import           Prelude hiding (head, last, length, null)
 
+import           Codec.CBOR.Encoding (Encoding)
 import           Control.Exception (assert)
 import           Data.List (find)
 import           Data.Word (Word64)
@@ -124,11 +126,12 @@ data AnchoredFragment block = AnchoredFragment
     } deriving (Show, Eq)
 
 mkAnchoredFragment :: HasHeader block
-                   => Point block -> ChainFragment block
+                   => (block -> Encoding)
+                   -> Point block -> ChainFragment block
                    -> AnchoredFragment block
-mkAnchoredFragment a c = case CF.last c of
+mkAnchoredFragment toEnc a c = case CF.last c of
     Nothing -> AnchoredFragment a CF.Empty
-    Just b  -> assert (validExtension (Empty a) b) $
+    Just b  -> assert (validExtension toEnc (Empty a) b) $
                AnchoredFragment a c
 
 -- | \( O(1) \). Pattern for matching on or creating an empty
@@ -153,32 +156,22 @@ pattern (:>) :: HasHeader block
              => AnchoredFragment block -> block -> AnchoredFragment block
 pattern af' :> b <- (viewRight -> ConsR af' b)
   where
-    af@(AnchoredFragment a c) :> b =
-      assert (validExtension af b) $
-      AnchoredFragment a (c CF.:> b)
+    af@(AnchoredFragment a c) :> b = AnchoredFragment a (c CF.:> b)
 
 -- | Auxiliary data type to define the pattern synonym
 data ViewLeft block
     = EmptyL (Point block)
     | ConsL  block (AnchoredFragment block)
 
-viewLeft :: HasHeader block => AnchoredFragment block -> ViewLeft block
-viewLeft (AnchoredFragment a c) = case c of
-    CF.Empty   -> EmptyL a
-    b CF.:< c' -> ConsL b (AnchoredFragment (blockPoint b) c')
-
 -- | \( O(1) \). View the first, leftmost block of the anchored fragment.
---
--- This is only a view, not a constructor, as adding a block to the left would
--- change the anchor of the fragment.
-pattern (:<) :: HasHeader block
-             => block -> AnchoredFragment block -> AnchoredFragment block
-pattern b :< af' <- (viewLeft -> ConsL b af')
+viewLeft :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> ViewLeft block
+viewLeft toEnc (AnchoredFragment a c) = case c of
+    CF.Empty   -> EmptyL a
+    b CF.:< c' -> ConsL b (AnchoredFragment (blockPoint toEnc b) c')
 
-infixl 5 :>, :<
+infixl 5 :>
 
 {-# COMPLETE Empty, (:>) #-}
-{-# COMPLETE Empty, (:<) #-}
 
 prettyPrint :: HasHeader block
             => String
@@ -192,18 +185,18 @@ prettyPrint nl ppAnchor ppBlock (AnchoredFragment a c) =
 
 
 -- | \( O(n) \).
-valid :: HasHeader block => AnchoredFragment block -> Bool
-valid (Empty _) = True
-valid (af :> b) = valid af && validExtension af b
+valid :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> Bool
+valid _ (Empty _) = True
+valid toEnc (af :> b) = valid toEnc af && validExtension toEnc af b
 
 -- | \( O(1) \).
-validExtension :: HasHeader block => AnchoredFragment block -> block -> Bool
-validExtension af bSucc =
+validExtension :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> block -> Bool
+validExtension toEnc af bSucc =
     blockInvariant bSucc &&
     case head af of
       Left  p -> pointHash p == blockPrevHash bSucc &&
                  pointSlot p <  blockSlot     bSucc
-      Right b -> bSucc `CF.isValidSuccessorOf` b
+      Right b -> CF.isValidSuccessorOf toEnc bSucc b
 
 -- | \( O(1) \). When the fragment is empty, return the anchor point,
 -- otherwise the most recently added block.
@@ -212,8 +205,8 @@ head (_ :> b)  = Right b
 head (Empty a) = Left a
 
 -- | \( O(1) \). When the fragment is empty, the anchor point is returned.
-headPoint :: HasHeader block => AnchoredFragment block -> Point block
-headPoint = either id blockPoint . head
+headPoint :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> Point block
+headPoint toEnc = either id (blockPoint toEnc) . head
 
 -- | \( O(1) \). When the fragment is empty, the slot of the anchor point is
 -- returned.
@@ -222,8 +215,8 @@ headSlot = either pointSlot blockSlot . head
 
 -- | \( O(1) \). When the fragment is empty, the hash of the anchor point is
 -- returned.
-headHash :: HasHeader block => AnchoredFragment block -> ChainHash block
-headHash = either pointHash (BlockHash . blockHash) . head
+headHash :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> ChainHash block
+headHash toEnc = either pointHash (BlockHash . blockHash toEnc) . head
 
 -- | \( O(1) \). When the fragment is empty, 'Nothing' is returned, as the
 -- anchor point has no 'BlockNo'.
@@ -232,18 +225,18 @@ headBlockNo = either (const Nothing) (Just . blockNo) . head
 
 -- | \( O(1) \). When the fragment is empty, return the anchor point,
 -- otherwise the leftmost block.
-last :: HasHeader block => AnchoredFragment block -> Either (Point block) block
-last (b :< _)  = Right b
-last (Empty a) = Left a
+last :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> Either (Point block) block
+last toEnc (viewLeft toEnc -> ConsL b _)  = Right b
+last _ (Empty a) = Left a
 
 -- | \( O(1) \). When the fragment is empty, the anchor point is returned.
-lastPoint :: HasHeader block => AnchoredFragment block -> Point block
-lastPoint = either id blockPoint . last
+lastPoint :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> Point block
+lastPoint toEnc = either id (blockPoint toEnc) . last toEnc
 
 -- | \( O(1) \). When the fragment is empty, the slot of the anchor point is
 -- returned.
-lastSlot :: HasHeader block => AnchoredFragment block -> SlotNo
-lastSlot = either pointSlot blockSlot . last
+lastSlot :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> SlotNo
+lastSlot toEnc = either pointSlot blockSlot . last toEnc
 
 -- | TODO. Make a list of blocks from a 'AnchoredFragment', in newest-to-oldest
 -- order.
@@ -267,9 +260,10 @@ fromNewestFirst a = foldr (flip (:>)) (Empty a)
 -- oldest-to-newest order. The first block in the list must be the block
 -- following the given anchor point.
 fromOldestFirst :: HasHeader block
-                => Point block  -- ^ Anchor
+                => (block -> Encoding)
+                -> Point block  -- ^ Anchor
                 -> [block] -> AnchoredFragment block
-fromOldestFirst a bs = mkAnchoredFragment a (CF.fromOldestFirst bs)
+fromOldestFirst toEnc a bs = mkAnchoredFragment toEnc a (CF.fromOldestFirst toEnc bs)
 
 -- | \( O(\log(\min(i,n-i)) \). Drop the newest @n@ blocks from the
 -- 'AnchoredFragment'. The anchor point is not changed.
@@ -318,13 +312,14 @@ addBlock b c = c :> b
 -- the given 'Point' is the head. If the given 'Point' is not within the
 -- bounds of the 'AnchoredFragment', return 'Nothing'.
 rollback :: HasHeader block
-         => Point block -> AnchoredFragment block
+         => (block -> Encoding)
+         -> Point block -> AnchoredFragment block
          -> Maybe (AnchoredFragment block)
-rollback p (AnchoredFragment a c)
+rollback toEnc p (AnchoredFragment a c)
     | p == a
     = Just (Empty a)
     | otherwise
-    = (AnchoredFragment a) <$> CF.rollback p c
+    = (AnchoredFragment a) <$> CF.rollback toEnc p c
 
 -- | \( O(o \log(\min(i,n-i))) \). See 'CF.selectPoints'.
 --
@@ -334,9 +329,9 @@ rollback p (AnchoredFragment a c)
 -- corresponds to the anchor point. When the fragment is empty, offset 0 will
 -- thus correspond to the anchor point.
 selectPoints :: HasHeader block
-             => [Int] -> AnchoredFragment block -> [Point block]
-selectPoints offsets (AnchoredFragment a c) =
-    CF.selectPoints offsetsOnFrag c <> map (const a) anchorOffsets
+             => (block -> Encoding) -> [Int] -> AnchoredFragment block -> [Point block]
+selectPoints toEnc offsets (AnchoredFragment a c) =
+    CF.selectPoints toEnc offsetsOnFrag c <> map (const a) anchorOffsets
   where
     len = CF.length c
     (offsetsOnFrag, offsetsAfterFrag) = span (< len) offsets
@@ -346,26 +341,29 @@ selectPoints offsets (AnchoredFragment a c) =
 -- given point is the anchor point, then the first block is returned (if there
 -- is one).
 successorBlock :: HasHeader block
-               => Point block -> AnchoredFragment block -> Maybe block
-successorBlock p af@(AnchoredFragment a c)
+               => (block -> Encoding) -> Point block -> AnchoredFragment block -> Maybe block
+successorBlock toEnc p af@(AnchoredFragment a c)
     | p == a
-    = either (const Nothing) Just $ last af
+    = either (const Nothing) Just $ last toEnc af
     | otherwise
-    = CF.successorBlock p c
+    = CF.successorBlock toEnc p c
 
 -- | \( O(\log(\min(i,n-i)) \). Same as 'CF.pointOnChainFragment': does the
 -- fragment contain a block with the given block? The anchor point is ignored.
 pointOnFragment :: HasHeader block
-                => Point block -> AnchoredFragment block -> Bool
-pointOnFragment p (AnchoredFragment _ c) = CF.pointOnChainFragment p c
+                => (block -> Encoding) -> Point block -> AnchoredFragment block -> Bool
+pointOnFragment toEnc p (AnchoredFragment _ c) = CF.pointOnChainFragment toEnc p c
 
 -- | \( O(\log(\min(i,n-i)) \). Is the point within the fragment bounds?
 -- Either the point is the anchor point, or it corresponds to a block \"on\"
 -- the fragment.
 withinFragmentBounds :: HasHeader block
-                     => Point block -> AnchoredFragment block -> Bool
-withinFragmentBounds p (AnchoredFragment a c) =
-    p == a || CF.pointOnChainFragment p c
+                     => (block -> Encoding)
+                     -> Point block
+                     -> AnchoredFragment block
+                     -> Bool
+withinFragmentBounds toEnc p (AnchoredFragment a c) =
+    p == a || CF.pointOnChainFragment toEnc p c
 
 
 -- | \( O(p \log(\min(i,n-i)) \). Find the first 'Point' in the list of points
@@ -375,25 +373,28 @@ withinFragmentBounds p (AnchoredFragment a c) =
 -- 'withinFragmentBounds' instead of 'CF.pointOnFragment'.
 findFirstPoint
   :: HasHeader block
-  => [Point block]
+  => (block -> Encoding)
+  -> [Point block]
   -> AnchoredFragment block
   -> Maybe (Point block)
-findFirstPoint ps c = find (`withinFragmentBounds` c) ps
+findFirstPoint toEnc ps c = find (\b -> withinFragmentBounds toEnc b c) ps
 
 
 applyChainUpdate :: HasHeader block
-                 => ChainUpdate block
+                 => (block -> Encoding)
+                 -> ChainUpdate block
                  -> AnchoredFragment block
                  -> Maybe (AnchoredFragment block)
-applyChainUpdate (AddBlock b) c = Just (addBlock b c)
-applyChainUpdate (RollBack p) c =       rollback p c
+applyChainUpdate _ (AddBlock b) c = Just (addBlock b c)
+applyChainUpdate toEnc (RollBack p) c = rollback toEnc p c
 
 applyChainUpdates :: HasHeader block
-                  => [ChainUpdate block]
+                  => (block -> Encoding)
+                  -> [ChainUpdate block]
                   -> AnchoredFragment block
                   -> Maybe (AnchoredFragment block)
-applyChainUpdates []     c = Just c
-applyChainUpdates (u:us) c = applyChainUpdates us =<< applyChainUpdate u c
+applyChainUpdates _ []     c = Just c
+applyChainUpdates toEnc (u:us) c = applyChainUpdates toEnc us =<< applyChainUpdate toEnc u c
 
 -- | Convert a 'Chain' to an 'AnchoredFragment'.
 --
@@ -405,10 +406,10 @@ fromChain = fromNewestFirst Chain.genesisPoint . Chain.toNewestFirst
 --
 -- The anchor of the fragment must be 'Chain.genesisPoint', otherwise
 -- 'Nothing' is returned.
-toChain :: HasHeader block => AnchoredFragment block -> Maybe (Chain block)
-toChain af@(AnchoredFragment a _)
+toChain :: HasHeader block => (block -> Encoding) -> AnchoredFragment block -> Maybe (Chain block)
+toChain toEnc af@(AnchoredFragment a _)
     | a == Chain.genesisPoint
-    = Just $ Chain.fromNewestFirst $ toNewestFirst af
+    = Just $ Chain.fromNewestFirst toEnc $ toNewestFirst af
     | otherwise
     = Nothing
 
@@ -418,16 +419,17 @@ toChain af@(AnchoredFragment a _)
 -- When the chain itself is shorter than @n@ blocks, the fragment will also be
 -- shorter than @n@ blocks (and anchored at genesis).
 anchorNewest :: forall block. HasHeader block
-             => Word64  -- ^ @n@
+             => (block -> Encoding)
+             -> Word64  -- ^ @n@
              -> Chain block
              -> AnchoredFragment block
-anchorNewest = go CF.Empty
+anchorNewest toEnc = go CF.Empty
   where
     -- Walk back over the chain, building up a chain fragment until k = 0 or
     -- we encountered genesis, then anchor the built-up chain fragment
     go :: ChainFragment block -> Word64 -> Chain block -> AnchoredFragment block
-    go cf _ Chain.Genesis   = mkAnchoredFragment Chain.genesisPoint cf
-    go cf 0 (_  Chain.:> b) = mkAnchoredFragment (blockPoint b)     cf
+    go cf _ Chain.Genesis   = mkAnchoredFragment toEnc Chain.genesisPoint cf
+    go cf 0 (_  Chain.:> b) = mkAnchoredFragment toEnc (blockPoint toEnc b) cf
     go cf n (ch Chain.:> b) = go (b CF.:< cf) (n - 1) ch
 
 -- | \( O(\max(n_1, n_2)) \). Check whether the first anchored fragment is a
@@ -450,16 +452,17 @@ AnchoredFragment a1 c1 `isPrefixOf` AnchoredFragment a2 c2 =
 splitAfterPoint
    :: forall block1 block2.
       (HasHeader block1, HasHeader block2, HeaderHash block1 ~ HeaderHash block2)
-   => AnchoredFragment block1
+   => (block1 -> Encoding)
+   -> AnchoredFragment block1
    -> Point block2
    -> Maybe (AnchoredFragment block1, AnchoredFragment block1)
-splitAfterPoint c pt = case CF.splitAfterPoint (unanchorFragment c) pt of
+splitAfterPoint toEnc c pt = case CF.splitAfterPoint toEnc (unanchorFragment c) pt of
    Just (cp, cs)
-     -> let p = mkAnchoredFragment (anchorPoint c) cp
-        in Just (p, mkAnchoredFragment (headPoint p) cs)
+     -> let p = mkAnchoredFragment toEnc (anchorPoint c) cp
+        in Just (p, mkAnchoredFragment toEnc (headPoint toEnc p) cs)
    Nothing
      | anchorPoint c == castPoint pt
-     -> Just (mkAnchoredFragment (anchorPoint c) CF.Empty, c)
+     -> Just (mkAnchoredFragment toEnc (anchorPoint c) CF.Empty, c)
      | otherwise
      -> Nothing
 
@@ -471,10 +474,11 @@ splitAfterPoint c pt = case CF.splitAfterPoint (unanchorFragment c) pt of
 --
 -- The returned fragment will have the same anchor as the first fragment.
 join :: HasHeader block
-     => AnchoredFragment block
+     => (block -> Encoding)
+     -> AnchoredFragment block
      -> AnchoredFragment block
      -> Maybe (AnchoredFragment block)
-join af1@(AnchoredFragment a1 c1) af2@(AnchoredFragment a2 c2) =
+join toEnc af1@(AnchoredFragment a1 c1) af2@(AnchoredFragment a2 c2) =
     case head af1 of
       -- First fragment is empty
       Left _
@@ -483,8 +487,8 @@ join af1@(AnchoredFragment a1 c1) af2@(AnchoredFragment a2 c2) =
         | otherwise
         -> Nothing
       Right b1Head
-        | blockPoint b1Head == a2
-        -> mkAnchoredFragment a1 <$> CF.joinChainFragments c1 c2
+        | blockPoint toEnc b1Head == a2
+        -> mkAnchoredFragment toEnc a1 <$> CF.joinChainFragments toEnc c1 c2
         | otherwise
         -> Nothing
 
@@ -564,24 +568,26 @@ join af1@(AnchoredFragment a1 c1) af2@(AnchoredFragment a2 c2) =
 intersect
     :: forall block1 block2.
        (HasHeader block1, HasHeader block2, HeaderHash block1 ~ HeaderHash block2)
-    => AnchoredFragment block1
+    => (block1 -> Encoding)
+    -> (block2 -> Encoding)
+    -> AnchoredFragment block1
     -> AnchoredFragment block2
     -> Maybe (AnchoredFragment block1, AnchoredFragment block2,
               AnchoredFragment block1, AnchoredFragment block2)
-intersect c1 c2 = go c2
+intersect toEnc1 toEnc2 c1 c2 = go c2
   where
     go :: AnchoredFragment block2
        -> Maybe (AnchoredFragment block1, AnchoredFragment block2,
                  AnchoredFragment block1, AnchoredFragment block2)
     go (Empty a2)
-      | Just (p1, s1) <- splitAfterPoint c1 a2
-      = Just (p1, mkAnchoredFragment a2 CF.Empty, s1, c2)
+      | Just (p1, s1) <- splitAfterPoint toEnc1 c1 a2
+      = Just (p1, mkAnchoredFragment toEnc2 a2 CF.Empty, s1, c2)
       | otherwise
       = Nothing
     go (c2' :> b)
-      | let pt = blockPoint b
-      , Just (p1, s1) <- splitAfterPoint c1 pt
-      , Just (p2, s2) <- splitAfterPoint c2 pt
+      | let pt = blockPoint toEnc2 b
+      , Just (p1, s1) <- splitAfterPoint toEnc1 c1 pt
+      , Just (p2, s2) <- splitAfterPoint toEnc2 c2 pt
         -- splitAfterPoint c2 pt cannot fail,
         -- since pt comes out of c2
       = Just (p1, p2, s1, s2)
@@ -597,10 +603,12 @@ intersect c1 c2 = go c2
 -- return the anchor point @5*@.
 intersectionPoint
     :: (HasHeader block1, HasHeader block2, HeaderHash block1 ~ HeaderHash block2)
-    => AnchoredFragment block1
+    => (block1 -> Encoding)
+    -> (block2 -> Encoding)
+    -> AnchoredFragment block1
     -> AnchoredFragment block2
     -> Maybe (Point block1)
-intersectionPoint c1 c2 = case c1 `intersect` c2 of
+intersectionPoint toEnc1 toEnc2 c1 c2 = case intersect toEnc1 toEnc2 c1 c2 of
     Just (_, _, s1, _) -> Just (anchorPoint s1)
     Nothing            -> Nothing
 
@@ -615,4 +623,3 @@ mapAnchoredFragment :: (HasHeader block1, HasHeader block2,
                  -> AnchoredFragment block2
 mapAnchoredFragment f (AnchoredFragment a c) =
     AnchoredFragment (castPoint a) (CF.mapChainFragment f c)
-

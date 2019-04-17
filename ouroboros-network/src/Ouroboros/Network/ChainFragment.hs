@@ -91,7 +91,7 @@ import qualified Data.Foldable as Foldable
 import qualified Data.List as L
 import           Data.Maybe (isJust)
 import           Codec.Serialise (Serialise (..))
-import           Codec.CBOR.Encoding (encodeListLen)
+import           Codec.CBOR.Encoding (Encoding, encodeListLen)
 import           Codec.CBOR.Decoding (decodeListLen)
 
 import           Ouroboros.Network.Block
@@ -138,16 +138,13 @@ pattern Empty <- (viewRight -> FT.EmptyR) where
 pattern (:>) :: HasHeader block
              => ChainFragment block -> block -> ChainFragment block
 pattern c :> b <- (viewRight -> (c FT.:> b)) where
-  ChainFragment c :> b = assert (validExtension (ChainFragment c) b) $
-                         ChainFragment (c FT.|> b)
+  ChainFragment c :> b = ChainFragment (c FT.|> b)
 
 -- | \( O(1) \). Add a block to the left of the chain fragment.
 pattern (:<) :: HasHeader block
              => block -> ChainFragment block -> ChainFragment block
 pattern b :< c <- (viewLeft -> (b FT.:< c)) where
-  b :< ChainFragment c = assert (maybe True (`isValidSuccessorOf` b)
-                                       (last (ChainFragment c))) $
-                         ChainFragment (b FT.<| c)
+  b :< ChainFragment c = ChainFragment (b FT.<| c)
 
 infixl 5 :>, :<
 
@@ -187,9 +184,12 @@ mapChainFragment :: (HasHeader block1, HasHeader block2)
 mapChainFragment f (ChainFragment c) = ChainFragment (FT.fmap' f c)
 
 -- | \( O(n) \).
-valid :: HasHeader block => ChainFragment block -> Bool
-valid Empty = True
-valid (c :> b) = valid c && validExtension c b
+valid :: HasHeader block
+      => (block -> Encoding)
+      ->  ChainFragment block
+      -> Bool
+valid _ Empty = True
+valid toEnc (c :> b) = valid toEnc c && validExtension toEnc c b
 
 -- | Checks whether the first block @bSucc@ is a valid successor of the second
 -- block @b@.
@@ -201,24 +201,25 @@ valid (c :> b) = valid c && validExtension c b
 -- This function does not check whether any of the two blocks satisfy
 -- 'blockInvariant'.
 isValidSuccessorOf :: HasHeader block
-                   => block  -- ^ @bSucc@
+                   => (block -> Encoding)
+                   -> block  -- ^ @bSucc@
                    -> block  -- ^ @b@
                    -> Bool
-isValidSuccessorOf bSucc b =
+isValidSuccessorOf toEnc bSucc b =
     pointHash p == blockPrevHash bSucc
  && pointSlot p <  blockSlot bSucc
  && blockNo   b == pred (blockNo bSucc)
   where
-    p = blockPoint b
+    p = blockPoint toEnc b
 
 -- | \( O(1) \).
-validExtension ::  HasHeader block => ChainFragment block -> block -> Bool
-validExtension c bSucc =
+validExtension ::  HasHeader block => (block -> Encoding) -> ChainFragment block -> block -> Bool
+validExtension toEnc c bSucc =
     blockInvariant bSucc
  && blockSlot bSucc /= SlotNo 0
  && case head c of
       Nothing -> True
-      Just b  -> bSucc `isValidSuccessorOf` b
+      Just b  -> isValidSuccessorOf toEnc bSucc b
 
 -- | \( O(1) \).
 head :: HasHeader block => ChainFragment block -> Maybe block
@@ -226,16 +227,16 @@ head (_ :> b) = Just b
 head Empty    = Nothing
 
 -- | \( O(1) \).
-headPoint :: HasHeader block => ChainFragment block -> Maybe (Point block)
-headPoint = fmap blockPoint . head
+headPoint :: HasHeader block => (block -> Encoding) -> ChainFragment block -> Maybe (Point block)
+headPoint toEnc = fmap (blockPoint toEnc) . head
 
 -- | \( O(1) \).
 headSlot :: HasHeader block => ChainFragment block -> Maybe SlotNo
 headSlot = fmap blockSlot . head
 
 -- | \( O(1) \).
-headHash :: HasHeader block => ChainFragment block -> Maybe (ChainHash block)
-headHash = fmap (BlockHash . blockHash) . head
+headHash :: HasHeader block => (block -> Encoding) -> ChainFragment block -> Maybe (ChainHash block)
+headHash toEnc = fmap (BlockHash . blockHash toEnc) . head
 
 -- | \( O(1) \).
 headBlockNo :: HasHeader block => ChainFragment block -> Maybe BlockNo
@@ -247,8 +248,8 @@ last (b :< _) = Just b
 last Empty    = Nothing
 
 -- | \( O(1) \).
-lastPoint :: HasHeader block => ChainFragment block -> Maybe (Point block)
-lastPoint = fmap blockPoint . last
+lastPoint :: HasHeader block => (block -> Encoding) -> ChainFragment block -> Maybe (Point block)
+lastPoint toEnc = fmap (blockPoint toEnc) . last
 
 -- | \( O(1) \).
 lastSlot :: HasHeader block => ChainFragment block -> Maybe SlotNo
@@ -271,8 +272,8 @@ fromNewestFirst = foldr (flip (:>)) Empty
 
 -- | \( O(n) \). Make a 'ChainFragment' from a list of blocks in
 -- oldest-to-newest order.
-fromOldestFirst :: HasHeader block => [block] -> ChainFragment block
-fromOldestFirst bs = assert (valid c) c
+fromOldestFirst :: HasHeader block => (block -> Encoding) -> [block] -> ChainFragment block
+fromOldestFirst toEnc bs = assert (valid toEnc c) c
   where
     c = ChainFragment $ FT.fromList bs
 
@@ -346,8 +347,8 @@ null (ChainFragment c) = FT.null c
 -- | \( O(1) \). Add a block to the right of the chain fragment.
 --
 -- Synonym for ':>'.
-addBlock :: HasHeader block => block -> ChainFragment block -> ChainFragment block
-addBlock b c = c :> b
+addBlock :: HasHeader block => (block -> Encoding) -> block -> ChainFragment block -> ChainFragment block
+addBlock toEnc b c = assert (validExtension toEnc c b) $ c :> b
 
 -- | \( O(\log(\min(i,n-i)) \). If the 'Point' is in the 'ChainFragment', roll
 -- back to a 'ChainFragment' such that its last 'Point' is the given 'Point'.
@@ -356,8 +357,9 @@ addBlock b c = c :> b
 -- given 'Point' is the last block. If the given 'Point' is not part of the
 -- 'ChainFragment', return 'Nothing'.
 rollback :: HasHeader block
-         => Point block -> ChainFragment block -> Maybe (ChainFragment block)
-rollback p c = fst <$> splitAfterPoint c p
+         => (block -> Encoding)
+         -> Point block -> ChainFragment block -> Maybe (ChainFragment block)
+rollback toEnc p c = fst <$> splitAfterPoint toEnc c p
 
 -- | \( O(\log(\min(i,n-i)) \). Internal variant of 'lookupBySlot' that
 -- returns a 'FT.SearchResult'.
@@ -427,14 +429,14 @@ filter p = go [] Empty
 -- Only for offsets within the bounds of the chain fragment, will there be
 -- points in the returned list.
 selectPoints :: HasHeader block
-             => [Int] -> ChainFragment block -> [Point block]
-selectPoints offsets = go relativeOffsets
+             => (block -> Encoding) -> [Int] -> ChainFragment block -> [Point block]
+selectPoints toEnc offsets = go relativeOffsets
   where
     relativeOffsets = zipWith (-) offsets (0:offsets)
     go []         _     = []
     go _          Empty = []
     go (off:offs) c     = case lookupByIndexFromEnd c off of
-      FT.Position t b _ -> blockPoint b : go offs (ChainFragment (t FT.|> b))
+      FT.Position t b _ -> blockPoint toEnc b : go offs (ChainFragment (t FT.|> b))
       _                 -> []
 
 -- | \( O(o * n) \). Specification of 'selectPoints'.
@@ -443,9 +445,9 @@ selectPoints offsets = go relativeOffsets
 --
 -- This function is used to verify whether 'selectPoints' behaves as expected.
 selectPointsSpec :: HasHeader block
-                => [Int] -> ChainFragment block -> [Point block]
-selectPointsSpec offsets c =
-    [ blockPoint (bs !! offset)
+                => (block -> Encoding) -> [Int] -> ChainFragment block -> [Point block]
+selectPointsSpec toEnc offsets c =
+    [ blockPoint toEnc (bs !! offset)
     | let bs = toNewestFirst c
           len = L.length bs
     , offset <- offsets
@@ -453,10 +455,10 @@ selectPointsSpec offsets c =
 
 -- | \( O(\log(\min(i,n-i)) \). Find the block after the given point.
 successorBlock :: HasHeader block
-               => Point block -> ChainFragment block -> Maybe block
-successorBlock p c = case lookupBySlotFT c (pointSlot p) of
+               => (block -> Encoding) -> Point block -> ChainFragment block -> Maybe block
+successorBlock toEnc p c = case lookupBySlotFT c (pointSlot p) of
   FT.Position _ b ft'
-    | blockPoint b == p
+    | blockPoint toEnc b == p
     , n FT.:< _ <- FT.viewl ft' -- O(1)
     -> Just n
   _ -> Nothing
@@ -483,13 +485,14 @@ splitAfterSlot (ChainFragment t) s = (ChainFragment l, ChainFragment r)
 -- the (newest\/rightmost) block of the first returned chain.
 splitAfterPoint :: (HasHeader block1, HasHeader block2,
                     HeaderHash block1 ~ HeaderHash block2)
-                => ChainFragment block1
+                => (block1 -> Encoding)
+                -> ChainFragment block1
                 -> Point block2
                 -> Maybe (ChainFragment block1, ChainFragment block1)
-splitAfterPoint c p
+splitAfterPoint toEnc c p
   | (l@(ChainFragment lt), r) <- splitAfterSlot c (pointSlot p)
   , _ FT.:> b <- FT.viewr lt  -- O(1)
-  , blockPoint b == castPoint p
+  , blockPoint toEnc b == castPoint p
   = Just (l, r)
   | otherwise
   = Nothing
@@ -510,13 +513,14 @@ splitBeforeSlot (ChainFragment t) s = (ChainFragment l, ChainFragment r)
 
 splitBeforePoint :: (HasHeader block1, HasHeader block2,
                     HeaderHash block1 ~ HeaderHash block2)
-                 => ChainFragment block1
+                 => (block1 -> Encoding)
+                 -> ChainFragment block1
                  -> Point block2
                  -> Maybe (ChainFragment block1, ChainFragment block1)
-splitBeforePoint c p
+splitBeforePoint toEnc c p
   | (l, r@(ChainFragment rt)) <- splitBeforeSlot c (pointSlot p)
   , b FT.:< _ <- FT.viewl rt  -- O(1)
-  , blockPoint b == castPoint p
+  , blockPoint toEnc b == castPoint p
   = Just (l, r)
   | otherwise
   = Nothing
@@ -527,13 +531,14 @@ splitBeforePoint c p
 -- Both points must exist on the chain, in order, or the result is @Nothing@.
 --
 sliceRange :: HasHeader block
-           => ChainFragment block
+           => (block -> Encoding)
+           -> ChainFragment block
            -> Point block
            -> Point block
            -> Maybe (ChainFragment block)
-sliceRange c from to
-  | Just (_, c') <- splitBeforePoint c  from
-  , Just (c'',_) <- splitAfterPoint  c' to
+sliceRange toEnc c from to
+  | Just (_, c') <- splitBeforePoint toEnc c  from
+  , Just (c'',_) <- splitAfterPoint toEnc c' to
   = Just c''
 
   | otherwise
@@ -545,10 +550,11 @@ sliceRange c from to
 -- on the 'ChainFragment'. TODO test?
 findFirstPoint
   :: HasHeader block
-  => [Point block]
+  => (block -> Encoding)
+  -> [Point block]
   -> ChainFragment block
   -> Maybe (Point block)
-findFirstPoint ps c = L.find (`pointOnChainFragment` c) ps
+findFirstPoint toEnc ps c = L.find (\b -> pointOnChainFragment toEnc b c) ps
 
 -- | \( O(\log(\min(i,n-i)) \).
 slotOnChainFragment :: HasHeader block => SlotNo -> ChainFragment block -> Bool
@@ -569,9 +575,9 @@ slotOnChainFragmentSpec slot = go
                  | otherwise           = go c'
 
 -- | \( O(\log(\min(i,n-i)) \).
-pointOnChainFragment :: HasHeader block => Point block -> ChainFragment block -> Bool
-pointOnChainFragment p c = case lookupBySlot c (pointSlot p) of
-  Just b | blockPoint b == p -> True
+pointOnChainFragment :: HasHeader block => (block -> Encoding) -> Point block -> ChainFragment block -> Bool
+pointOnChainFragment toEnc p c = case lookupBySlot c (pointSlot p) of
+  Just b | blockPoint toEnc b == p -> True
   _                          -> False
 
 -- | \( O(n) \). Specification of 'pointOnChainFragment'.
@@ -581,12 +587,12 @@ pointOnChainFragment p c = case lookupBySlot c (pointSlot p) of
 -- This function is used to verify whether 'pointOnChainFragment' behaves as
 -- expected.
 pointOnChainFragmentSpec :: HasHeader block
-                         => Point block -> ChainFragment block -> Bool
-pointOnChainFragmentSpec p = go
+                         => (block -> Encoding) -> Point block -> ChainFragment block -> Bool
+pointOnChainFragmentSpec toEnc p = go
     where
     -- Recursively search the fingertree from the right
     go Empty = False
-    go (c' :> b) | blockPoint b == p = True
+    go (c' :> b) | blockPoint toEnc b == p = True
                  | otherwise         = go c'
 
 -- | \( O(n_2 \log(n_1)) \). Look for the intersection of the two
@@ -655,18 +661,20 @@ pointOnChainFragmentSpec p = go
 -- > Just (l1,       l2,        r1,       r2)
 intersectChainFragments
   :: (HasHeader block1, HasHeader block2, HeaderHash block1 ~ HeaderHash block2)
-  => ChainFragment block1
+  => (block1 -> Encoding)
+  -> (block2 -> Encoding)
+  -> ChainFragment block1
   -> ChainFragment block2
   -> Maybe (ChainFragment block1, ChainFragment block2,
             ChainFragment block1, ChainFragment block2)
-intersectChainFragments initC1 initC2 =
+intersectChainFragments toEnc1 toEnc2 initC1 initC2 =
     go initC1 initC2
   where
     go _   Empty    = Nothing
     go c1 (c2 :> b)
-      | let p = blockPoint b
-      , Just (l1, r1) <- splitAfterPoint c1     p
-      , Just (l2, r2) <- splitAfterPoint initC2 p
+      | let p = blockPoint toEnc2 b
+      , Just (l1, r1) <- splitAfterPoint toEnc1 c1     p
+      , Just (l2, r2) <- splitAfterPoint toEnc2 initC2 p
                     -- splitAfterPoint initC2 p cannot fail,
                     -- since p comes out of initC2
                     = Just (l1, l2, r1, r2)
@@ -674,18 +682,20 @@ intersectChainFragments initC1 initC2 =
 
 -- This is the key operation on chains in this model
 applyChainUpdate :: HasHeader block
-                 => ChainUpdate block
+                 => (block -> Encoding)
+                 -> ChainUpdate block
                  -> ChainFragment block
                  -> Maybe (ChainFragment block)
-applyChainUpdate (AddBlock b) c = Just (addBlock b c)
-applyChainUpdate (RollBack p) c =       rollback p c
+applyChainUpdate toEnc (AddBlock b) c = Just (addBlock toEnc b c)
+applyChainUpdate toEnc (RollBack p) c =       rollback toEnc p c
 
 applyChainUpdates :: HasHeader block
-                  => [ChainUpdate block]
+                  => (block -> Encoding)
+                  -> [ChainUpdate block]
                   -> ChainFragment block
                   -> Maybe (ChainFragment block)
-applyChainUpdates []     c = Just c
-applyChainUpdates (u:us) c = applyChainUpdates us =<< applyChainUpdate u c
+applyChainUpdates _ []     c = Just c
+applyChainUpdates toEnc (u:us) c = applyChainUpdates toEnc us =<< applyChainUpdate toEnc u c
 
 
 -- | \( O(\max(n_1, n_2)) \). Check whether the first chain fragment is a
@@ -699,20 +709,21 @@ a `isPrefixOf` b = toOldestFirst a `L.isPrefixOf` toOldestFirst b
 -- (oldest) block of the second fragment is the successor of the last (newest)
 -- block of the first fragment.
 joinChainFragments :: HasHeader block
-                   => ChainFragment block
+                   => (block -> Encoding)
+                   -> ChainFragment block
                    -> ChainFragment block
                    -> Maybe (ChainFragment block)
-joinChainFragments c1@(ChainFragment t1) c2@(ChainFragment t2) =
+joinChainFragments toEnc c1@(ChainFragment t1) c2@(ChainFragment t2) =
     case (FT.viewr t1, FT.viewl t2) of
       (FT.EmptyR, _)           -> Just c2
       (_,         FT.EmptyL)   -> Just c1
-      (_ FT.:> b1, b2 FT.:< _) | b2 `isValidSuccessorOf` b1
+      (_ FT.:> b1, b2 FT.:< _) | isValidSuccessorOf toEnc b2 b1
                                -> Just (ChainFragment (t1 FT.>< t2))
       _                        -> Nothing
 
 -- | Convert a 'ChainFragment' to a 'Chain'.
-toChain :: HasHeader block => ChainFragment block -> Chain block
-toChain = Chain.fromNewestFirst . toNewestFirst
+toChain :: HasHeader block => (block -> Encoding) -> ChainFragment block -> Chain block
+toChain toEnc = Chain.fromNewestFirst toEnc . toNewestFirst
 
 -- | Convert a 'Chain' to a 'ChainFragment'.
 fromChain :: HasHeader block => Chain block -> ChainFragment block
@@ -736,4 +747,3 @@ instance (HasHeader block, Serialise block)
       go c 0 = return c
       go c n = do b <- decode
                   go (c :> b) (n-1)
-
