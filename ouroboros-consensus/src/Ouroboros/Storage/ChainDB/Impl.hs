@@ -205,16 +205,21 @@ openDB args = do
                   , cdbLgrDB   = lgrDB
                   , cdbChain   = chain
                   , cdbInvalid = invalid
+                  , cdbHeader  = cdbGetHeader args
                   }
     return ChainDB {
-        getIsFetched       = cdbGetIsFetched       env
+        addBlock           = undefined
       , getCurrentChain    = cdbGetCurrentChain    env
-      , getTipPoint        = cdbGetTipPoint        env
+      , getCurrentLedger   = undefined
       , getTipBlock        = cdbGetTipBlock        env
       , getTipHeader       = cdbGetTipHeader       env
+      , getTipPoint        = cdbGetTipPoint        env
       , getBlock           = cdbGetBlock           env
+      , getIsFetched       = cdbGetIsFetched       env
       , streamBlocks       = cdbStreamBlocks       env
+      , newReader          = undefined
       , knownInvalidBlocks = cdbKnownInvalidBlocks env
+      , pointOnChain       = undefined
       }
   where
     (argsImmDb, argsVolDb, argsLgrDb) = fromChainDbArgs args
