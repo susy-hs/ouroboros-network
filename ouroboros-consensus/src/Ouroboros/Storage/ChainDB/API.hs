@@ -312,6 +312,14 @@ data ChainDbFailure blk =
     -- not found
   | ImmDbMissingBlock (Either EpochNo SlotNo)
 
+    -- | A block at a certain slot in the immutable DB had an unexpected hash.
+    --
+    -- The immutable DB only knows of slots and not of hashes. This exception
+    -- gets thrown when the block at the given slot (1st argument) in the
+    -- immutable DB had another (3rd argument) hash than the expected one (2nd
+    -- argument).
+  | ImmDbHashMismatch SlotNo (HeaderHash blk) (HeaderHash blk)
+
     -- | The immutable DB threw an "unexpected error"
     --
     -- These are errors indicative of a disk failure (as opposed to API misuse)

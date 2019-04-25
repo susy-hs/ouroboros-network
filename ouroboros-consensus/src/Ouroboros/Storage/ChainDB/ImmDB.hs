@@ -184,17 +184,15 @@ streamBlocksAfter db low = wrap <$> streamBlobsAfter db low
 
 -- | Stream blobs after the given point
 --
--- Our 'Point' based API and the hash based API of the 'ImmutableDB' have a
--- slight impedance mismatch: the bounds offered by the 'ImmutableDB' are
--- inclusive, /if specified/. We can't offer that here, since it does not make
--- sense to stream /from/ (inclusive) the genesis block. Therefore we provide
--- an /exclusive/ lower bound as a 'Point': if the 'Point' refers to the genesis
--- block we don't give the 'ImmutableDB' a lower bound at all; if it doesn't,
--- we pass the hash as the lower bound to the 'ImmutableDB' and then step the
--- iterator one block to skip that first block.
---
--- If we do skip a block, we return it separately. We don't check the hash,
--- since we don't deserialize the block. We do this in 'streamBlocksAfter'.
+-- Our 'Point' based API and the 'SlotNo' + @hash@ based API of the
+-- 'ImmutableDB' have a slight impedance mismatch: the bounds offered by the
+-- 'ImmutableDB' are inclusive, /if specified/. We can't offer that here,
+-- since it does not make sense to stream /from/ (inclusive) the genesis
+-- block. Therefore we provide an /exclusive/ lower bound as a 'Point': if the
+-- 'Point' refers to the genesis block we don't give the 'ImmutableDB' a lower
+-- bound at all; if it doesn't, we pass the hash as the lower bound to the
+-- 'ImmutableDB' and then step the iterator one block to skip that first
+-- block.
 streamBlobsAfter :: forall m blk. (MonadCatch m, HasHeader blk, Typeable blk)
                  => ImmDB m blk
                  -> Point blk -- ^ Exclusive lower bound
@@ -221,17 +219,15 @@ streamBlobsAfter db low = withDB db $ \imm -> do
             skipped <- parseIteratorResult db =<< iteratorNext itr
             case skipped of
               IteratorResult slot' blk ->
-                _
-                -- todo: check
-
-
-{-
--- | The result of stepping an 'Iterator'.
-data IteratorResult hash a
-  = IteratorExhausted
-  | IteratorResult    SlotNo       a
-  | IteratorEBB       EpochNo hash a
--}
+                  unless (hash == hash' && slot == slot') $
+                    throwM $ ImmDbHashMismatch @blk slot hash hash'
+                where
+                  hash' = blockHash blk
+              IteratorEBB _ hash' _ ->
+                  unless (hash == hash') $ -- TODO check slot?
+                    throwM $ ImmDbHashMismatch @blk slot hash hash'
+              IteratorExhausted ->
+                  return ()
 
 parseIteratorResult :: (MonadThrow m, HasHeader blk)
                     => ImmDB m blk
