@@ -14,7 +14,9 @@ module Ouroboros.Storage.ChainDB.LgrDB (
   ) where
 
 import           Codec.Serialise.Decoding (Decoder)
+import           Control.Monad (when)
 import           Control.Monad.Except (runExcept)
+import           Data.Maybe (isJust)
 import           System.FilePath ((</>))
 
 import           Control.Monad.Class.MonadST
@@ -135,19 +137,43 @@ openDB LgrDbArgs{..} immDB getBlock = do
   Stream API to the immutable DB
 -------------------------------------------------------------------------------}
 
-streamAPI :: forall m blk. (MonadCatch m, HasHeader blk)
+streamAPI :: forall m blk. (MonadCatch m, MonadSTM m, HasHeader blk)
           => ImmDB m blk -> StreamAPI m (Point blk) blk
 streamAPI immDB = StreamAPI streamAfter
   where
     streamAfter :: Tip (Point blk)
                 -> (Maybe (m (NextBlock (Point blk) blk)) -> m a)
                 -> m a
-    streamAfter tip k = do
-        itr <- (ImmDB.streamBlocksAfter immDB (tipToPoint tip))
-        _
-{-
-    streamAfter :: Tip r
-                -> (Maybe (m (NextBlock r b)) -> m a)
-                -> m a
-    streamAfter tip k = do
--}
+    streamAfter tip k = bracket
+      (ImmDB.streamBlocksAfter immDB (tipToPoint tip))
+      ImmDB.iteratorClose
+      $ \itr -> do
+        first <- ImmDB.iteratorNext itr
+        case first of
+          ImmDB.IteratorExhausted -> k Nothing
+          _                       -> do
+            varNext <- atomically $ newTVar (Just (toNextBlock first))
+            k $ Just $ getNext itr varNext
+
+    -- The TVar stores the first block we got from the iterator when we had to
+    -- check whether it was empty or not. The TVar will only be filled once,
+    -- all subsequent calls will see an empty TVar and get the next block from
+    -- the iterator.
+    getNext :: ImmDB.Iterator (HeaderHash blk) m blk
+            -> TVar m (Maybe (NextBlock (Point blk) blk))
+            -> m (NextBlock (Point blk) blk)
+    getNext itr varNext = do
+      mbNext <- atomically $ do
+        mbNext <- readTVar varNext
+        when (isJust mbNext) $ writeTVar varNext Nothing
+        return mbNext
+      case mbNext of
+        Just next -> return next
+        Nothing   -> toNextBlock <$> ImmDB.iteratorNext itr
+
+    toNextBlock :: ImmDB.IteratorResult (HeaderHash blk) blk
+                -> NextBlock (Point blk) blk
+    toNextBlock res = case res of
+      ImmDB.IteratorExhausted    -> NoMoreBlocks
+      ImmDB.IteratorResult _ blk -> NextBlock (Block.blockPoint blk, blk)
+      ImmDB.IteratorEBB  _ _ blk -> NextBlock (Block.blockPoint blk, blk)
