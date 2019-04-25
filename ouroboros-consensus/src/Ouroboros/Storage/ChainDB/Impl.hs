@@ -18,6 +18,7 @@ import           Codec.CBOR.Decoding (Decoder)
 import           Codec.CBOR.Encoding (Encoding)
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Typeable (Typeable)
 
 import           Control.Monad.Class.MonadST
 import           Control.Monad.Class.MonadSTM
@@ -28,6 +29,7 @@ import qualified Ouroboros.Network.AnchoredFragment as Fragment
 import           Ouroboros.Network.Block (ChainHash (..), HasHeader (..), Point,
                      StandardHash)
 import qualified Ouroboros.Network.Block as Block
+import           Ouroboros.Network.Chain (genesisPoint)
 
 import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Protocol.Abstract
@@ -256,21 +258,43 @@ cdbGetTipPoint :: ( MonadSTM m
 cdbGetTipPoint = fmap (Block.castPoint . Fragment.headPoint)
                . cdbGetCurrentChain
 
-cdbGetTipBlock :: ChainDbEnv m blk hdr
+cdbGetTipBlock :: ( MonadCatch m
+                  , MonadSTM m
+                  , HasHeader blk
+                  , HasHeader hdr
+                  , HeaderHash hdr ~ HeaderHash blk
+                  , StandardHash blk
+                  )
+               => ChainDbEnv m blk hdr
                -> m (Maybe blk)
-cdbGetTipBlock = undefined
+cdbGetTipBlock cdb@CDB{..} = do
+    tipPoint <- atomically $ cdbGetTipPoint cdb
+    if tipPoint == genesisPoint
+      then return Nothing
+      else Just <$> implGetKnownBlock cdbImmDB cdbVolDB tipPoint
 
-cdbGetTipHeader :: Monad m
+cdbGetTipHeader :: ( MonadSTM m
+                   , HasHeader hdr
+                   )
                 => ChainDbEnv m blk hdr
                 -> m (Maybe hdr)
-cdbGetTipHeader cdb@CDB{..} = fmap cdbHeader <$> cdbGetTipBlock cdb
+cdbGetTipHeader CDB{..} =
+    eitherToMaybe . Fragment.head <$> atomically (readTVar cdbChain)
+  where
+    eitherToMaybe = either (const Nothing) Just
 
 cdbKnownInvalidBlocks :: MonadSTM m
                       => ChainDbEnv m blk hdr
                       -> STM m (Set (Point blk))
 cdbKnownInvalidBlocks CDB{..} = readTVar cdbInvalid
 
-cdbGetBlock :: ChainDbEnv m blk hdr
+cdbGetBlock :: ( MonadCatch m
+               , MonadSTM m
+               , HasHeader blk
+               , StandardHash blk
+               , Typeable blk
+               )
+            => ChainDbEnv m blk hdr
             -> Point blk -> m (Maybe blk)
 cdbGetBlock CDB{..} = implGetBlock cdbImmDB cdbVolDB
 
@@ -285,11 +309,29 @@ cdbStreamBlocks CDB{..} = implStreamBlocks cdbImmDB cdbVolDB
   been initialized
 -------------------------------------------------------------------------------}
 
-implGetBlock :: ImmDB m blk
+implGetBlock :: ( MonadCatch m
+                , MonadSTM m
+                , HasHeader blk
+                , StandardHash blk
+                , Typeable blk
+                )
+             => ImmDB m blk
              -> VolDB m blk hdr
              -> Point blk
              -> m (Maybe blk)
-implGetBlock immDB volDB = undefined
+implGetBlock immDB volDB point = case Block.pointHash point of
+    GenesisHash    -> return Nothing
+    BlockHash hash -> do
+      isInVolDB <- ($ hash) <$> atomically (VolDB.getIsMember volDB)
+      -- TODO is this the best way to determine whether the volatile or the
+      -- immutable DB should store a block?
+      if isInVolDB
+        then Just <$> VolDB.getKnownBlock volDB hash
+        -- TODO what if the point refers to an EBB? When the hash of the block
+        -- doesn't match that of the point, we know it, but then we need to
+        -- come up with the right EpochNo for the EBB. (Ideally, we just read
+        -- one block instead of two).
+        else ImmDB.getBlock immDB (Right (Block.pointSlot point))
 
 implStreamBlocks :: ImmDB m blk
                  -> VolDB m blk hdr
@@ -300,8 +342,24 @@ implStreamBlocks = undefined
 --
 -- If the block does /not/ exist, this is an indication of disk failure and
 -- should trigger recovery.
-implGetKnownBlock :: ImmDB m blk
+--
+-- PRECONDITION: the point may not refer to genesis
+implGetKnownBlock :: ( MonadCatch m
+                     , MonadSTM m
+                     , HasHeader blk
+                     , StandardHash blk
+                     , Typeable blk
+                     )
+                  => ImmDB m blk
                   -> VolDB m blk hdr
                   -> Point blk
                   -> m blk
-implGetKnownBlock = undefined
+implGetKnownBlock immDB volDB point = case Block.pointHash point of
+    GenesisHash    -> error "implGetKnownBlock: point may not refer to genesis"
+    BlockHash hash -> do
+      isInVolDB <- ($ hash) <$> atomically (VolDB.getIsMember volDB)
+      -- TODO see comment in 'implGetBlock'
+      if isInVolDB
+        then VolDB.getKnownBlock volDB hash
+        -- TODO see comment in 'implGetBlock'
+        else ImmDB.getKnownBlock immDB (Right (Block.pointSlot point))
