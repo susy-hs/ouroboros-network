@@ -42,8 +42,8 @@ import           Ouroboros.Network.ChainProducerState (ReaderId)
 import           Ouroboros.Consensus.Ledger.Abstract
 
 import           Ouroboros.Storage.Common
-import           Ouroboros.Storage.FS.API.Types (FsError)
 import qualified Ouroboros.Storage.ImmutableDB as ImmDB
+import qualified Ouroboros.Storage.VolatileDB as VolDB
 
 data ChainDB m blk hdr =
     ( HasHeader blk
@@ -338,8 +338,10 @@ data ChainDbFailure blk =
     -- successor index) nonetheless was not found
   | VolDbMissingBlock (HeaderHash blk)
 
-    -- | File system error whilst accessing the volatile DB
-  | VolDbFileSystemError FsError
+    -- | The volatile DB throw an "unexpected error"
+    --
+    -- These are errors indicative of a disk failure (as opposed to API misuse)
+  | VolDbFailure (VolDB.UnexpectedError (HeaderHash blk))
 
 deriving instance StandardHash blk => Show (ChainDbFailure blk)
 

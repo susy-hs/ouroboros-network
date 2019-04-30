@@ -14,6 +14,7 @@ module Ouroboros.Storage.ChainDB.LgrDB (
   ) where
 
 import           Codec.Serialise.Decoding (Decoder)
+import           Codec.Serialise.Encoding (Encoding)
 import           Control.Monad (when)
 import           Control.Monad.Except (runExcept)
 import           Data.Maybe (isJust)
@@ -61,6 +62,7 @@ data LgrDbArgs m blk = forall h. LgrDbArgs {
     , lgrDecodeLedger     :: forall s. Decoder s (LedgerState blk)
     , lgrDecodeChainState :: forall s. Decoder s (ChainState (BlockProtocol blk))
     , lgrDecodeHash       :: forall s. Decoder s (HeaderHash blk)
+    , lgrEncodePreHeader  :: PreHeader blk -> Encoding
     , lgrMemPolicy        :: MemPolicy
     , lgrGenesis          :: m (ExtLedgerState blk)
     }
@@ -83,6 +85,7 @@ defaultArgs fp = LgrDbArgs {
     , lgrDecodeLedger     = error "no default for lgrDecodeLedger"
     , lgrDecodeChainState = error "no default for lgrDecodeChainState"
     , lgrDecodeHash       = error "no default for lgrDecodeHash"
+    , lgrEncodePreHeader  = error "no default for lgrEncodePreHeader"
     , lgrMemPolicy        = error "no default for lgrMemPolicy"
     , lgrGenesis          = error "no default for lgrGenesis"
     }
@@ -131,7 +134,7 @@ openDB LgrDbArgs{..} immDB getBlock = do
           -> blk
           -> ExtLedgerState blk
           -> Either (ExtValidationError blk) (ExtLedgerState blk)
-    apply _ = runExcept .: applyExtLedgerState lgrNodeConfig
+    apply _ = runExcept .: applyExtLedgerState lgrEncodePreHeader lgrNodeConfig
 
 {-------------------------------------------------------------------------------
   Stream API to the immutable DB

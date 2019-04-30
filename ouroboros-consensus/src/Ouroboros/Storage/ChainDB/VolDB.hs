@@ -48,7 +48,8 @@ import           Ouroboros.Storage.ChainDB.API (ChainDbFailure (..))
 import           Ouroboros.Storage.FS.API (HasFS)
 import           Ouroboros.Storage.FS.API.Types (MountPoint (..))
 import           Ouroboros.Storage.FS.IO (ioHasFS)
-import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling)
+import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling,
+                     ThrowCantCatch)
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
 import           Ouroboros.Storage.VolatileDB (VolatileDB, VolatileDBError)
 import qualified Ouroboros.Storage.VolatileDB as VolDB
@@ -70,6 +71,7 @@ data VolDB m blk hdr = VolDB {
 data VolDbArgs m blk hdr = forall h. VolDbArgs {
       volHasFS         :: HasFS m h
     , volErr           :: ErrorHandling (VolatileDBError (HeaderHash blk)) m
+    , volErrSTM        :: ThrowCantCatch (VolatileDBError (HeaderHash blk)) (STM m)
     , volBlocksPerFile :: Int
     , volDecodeBlock   :: forall s. Decoder s blk
     , volGetHeader     :: blk -> hdr
@@ -84,8 +86,9 @@ data VolDbArgs m blk hdr = forall h. VolDbArgs {
 -- * getHeader
 defaultArgs :: StandardHash blk => FilePath -> VolDbArgs IO blk hdr
 defaultArgs fp = VolDbArgs {
-      volErr   = EH.exceptions
-    , volHasFS = ioHasFS $ MountPoint (fp </> "volatile")
+      volErr    = EH.exceptions
+    , volErrSTM = EH.throwSTM
+    , volHasFS  = ioHasFS $ MountPoint (fp </> "volatile")
       -- Fields without a default
     , volBlocksPerFile = error "no default for volBlocksPerFile"
     , volDecodeBlock   = error "no default for volDecodeBlock"
@@ -98,6 +101,7 @@ openDB args@VolDbArgs{..} = do
     volDB <- VolDB.openDB
                volHasFS
                volErr
+               volErrSTM
                (blockFileParser args)
                volBlocksPerFile
     return $ VolDB volDB volDecodeBlock volGetHeader
@@ -107,11 +111,7 @@ openDB args@VolDbArgs{..} = do
 -------------------------------------------------------------------------------}
 
 getIsMember :: VolDB m blk hdr -> STM m (HeaderHash blk -> Bool)
-getIsMember db = withSTM db $ \vol -> shouldBeSTM (VolDB.getIsMember vol)
-  where
-    -- TODO: Wait for Kostas' PR
-    shouldBeSTM :: m a -> STM m a
-    shouldBeSTM = undefined
+getIsMember db = withSTM db $ VolDB.getIsMember
 
 {-------------------------------------------------------------------------------
   Compute candidates
@@ -222,10 +222,8 @@ withDB VolDB{..} k = catch (k volDB) rethrow
     -- We might have to revisit this
     -- See also https://github.com/input-output-hk/ouroboros-network/issues/428
     wrap :: VolatileDBError (HeaderHash blk) -> Maybe (ChainDbFailure blk)
-    wrap (VolDB.FileSystemError err)   = Just (VolDbFileSystemError err)
-    wrap VolDB.VParserError{}          = Nothing
-    wrap VolDB.InvalidArgumentsError{} = Nothing
-    wrap VolDB.ClosedDBError{}         = Nothing
+    wrap (VolDB.UnexpectedError err) = Just (VolDbFailure err)
+    wrap VolDB.UserError{}           = Nothing
 
 -- | STM actions, by definition, cannot access the disk and therefore we don't
 -- have to worry about catching exceptions here: any exceptions that may be

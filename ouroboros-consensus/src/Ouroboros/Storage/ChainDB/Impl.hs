@@ -18,7 +18,6 @@ import           Codec.CBOR.Decoding (Decoder)
 import           Codec.CBOR.Encoding (Encoding)
 import           Data.Set (Set)
 import qualified Data.Set as Set
-import           Data.Typeable (Typeable)
 
 import           Control.Monad.Class.MonadST
 import           Control.Monad.Class.MonadSTM
@@ -37,7 +36,8 @@ import           Ouroboros.Consensus.Protocol.Abstract
 import           Ouroboros.Storage.ChainDB.API
 import           Ouroboros.Storage.Common
 import           Ouroboros.Storage.FS.API
-import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling)
+import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling,
+                     ThrowCantCatch)
 
 import           Ouroboros.Storage.ChainDB.ImmDB (ImmDB)
 import qualified Ouroboros.Storage.ChainDB.ImmDB as ImmDB
@@ -52,18 +52,23 @@ import qualified Ouroboros.Storage.ChainDB.VolDB as VolDB
 
 data ChainDbArgs m blk hdr = forall h1 h2 h3. ChainDbArgs {
 
-      -- Encoders and decoders
+      -- Decoders
 
       cdbDecodeHash       :: forall s. Decoder s (HeaderHash blk)
     , cdbDecodeBlock      :: forall s. Decoder s blk
     , cdbDecodeLedger     :: forall s. Decoder s (LedgerState blk)
     , cdbDecodeChainState :: forall s. Decoder s (ChainState (BlockProtocol blk))
+
+      -- Encoders
+
     , cdbEncodeHash       :: HeaderHash blk -> Encoding
+    , cdbEncodePreHeader  :: PreHeader blk -> Encoding
 
       -- Error handling
 
     , cdbErrImmDb         :: ErrorHandling ImmDB.ImmutableDBError m
     , cdbErrVolDb         :: ErrorHandling (VolDB.VolatileDBError (HeaderHash blk)) m
+    , cdbErrVolDbSTM      :: ThrowCantCatch (VolDB.VolatileDBError (HeaderHash blk)) (STM m)
 
       -- HasFS instances
 
@@ -116,6 +121,7 @@ fromChainDbArgs ChainDbArgs{..} = (
     , VolDB.VolDbArgs {
           volHasFS            = cdbHasFSVolDb
         , volErr              = cdbErrVolDb
+        , volErrSTM           = cdbErrVolDbSTM
         , volBlocksPerFile    = cdbBlocksPerFile
         , volDecodeBlock      = cdbDecodeBlock
         , volGetHeader        = cdbGetHeader
@@ -126,6 +132,7 @@ fromChainDbArgs ChainDbArgs{..} = (
         , lgrDecodeLedger     = cdbDecodeLedger
         , lgrDecodeChainState = cdbDecodeChainState
         , lgrDecodeHash       = cdbDecodeHash
+        , lgrEncodePreHeader  = cdbEncodePreHeader
         , lgrMemPolicy        = cdbMemPolicy
         , lgrGenesis          = cdbGenesis
         }
@@ -143,15 +150,18 @@ toChainDbArgs ( ImmDB.ImmDbArgs{..}
               , VolDB.VolDbArgs{..}
               , LgrDB.LgrDbArgs{..}
               ) = ChainDbArgs{
-      -- Encoders and decoders
+      -- Decoders
       cdbDecodeHash       = immDecodeHash
     , cdbDecodeBlock      = immDecodeBlock
     , cdbDecodeLedger     = lgrDecodeLedger
     , cdbDecodeChainState = lgrDecodeChainState
+      -- Encoders
     , cdbEncodeHash       = immEncodeHash
+    , cdbEncodePreHeader  = lgrEncodePreHeader
       -- Error handling
     , cdbErrImmDb         = immErr
     , cdbErrVolDb         = volErr
+    , cdbErrVolDbSTM      = volErrSTM
       -- HasFS instances
     , cdbHasFSImmDb       = immHasFS
     , cdbHasFSVolDb       = volHasFS
@@ -263,7 +273,6 @@ cdbGetTipBlock :: ( MonadCatch m
                   , HasHeader blk
                   , HasHeader hdr
                   , HeaderHash hdr ~ HeaderHash blk
-                  , StandardHash blk
                   )
                => ChainDbEnv m blk hdr
                -> m (Maybe blk)
@@ -291,8 +300,6 @@ cdbKnownInvalidBlocks CDB{..} = readTVar cdbInvalid
 cdbGetBlock :: ( MonadCatch m
                , MonadSTM m
                , HasHeader blk
-               , StandardHash blk
-               , Typeable blk
                )
             => ChainDbEnv m blk hdr
             -> Point blk -> m (Maybe blk)
@@ -312,8 +319,6 @@ cdbStreamBlocks CDB{..} = implStreamBlocks cdbImmDB cdbVolDB
 implGetBlock :: ( MonadCatch m
                 , MonadSTM m
                 , HasHeader blk
-                , StandardHash blk
-                , Typeable blk
                 )
              => ImmDB m blk
              -> VolDB m blk hdr
@@ -347,8 +352,6 @@ implStreamBlocks = undefined
 implGetKnownBlock :: ( MonadCatch m
                      , MonadSTM m
                      , HasHeader blk
-                     , StandardHash blk
-                     , Typeable blk
                      )
                   => ImmDB m blk
                   -> VolDB m blk hdr
