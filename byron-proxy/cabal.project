@@ -253,3 +253,8 @@ source-repository-package
   tag: e3e5d2b23057c2c3409e5e210b613527baf3b77d
   subdir: servant-client-core
 
+source-repository-package
+  type: git
+  location: https://github.com/karknu/scrypt.git
+  tag: 257e1de3081f5938f3ab8844120a5ae6af60f85a
+
