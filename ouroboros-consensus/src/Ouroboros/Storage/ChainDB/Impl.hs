@@ -367,3 +367,47 @@ implGetKnownBlock immDB volDB point = case Block.pointHash point of
         then VolDB.getKnownBlock volDB hash
         -- TODO see comment in 'implGetBlock'
         else ImmDB.getKnownBlock immDB (Right (Block.pointSlot point))
+
+{-------------------------------------------------------------------------------
+  Unifying interface over the immutable DB and volatile DB, but independent
+  of the ledger DB. These functions therefore do not require the entire
+  Chain DB to have been initialized.
+-------------------------------------------------------------------------------}
+
+-- | Thrown when requesting the genesis block from the database
+--
+-- Although the genesis block has a hash and a point associated with it, it
+-- does not actually exist other than as a concept; we cannot read and return
+-- it.
+data NoGenesisBlockException = NoGenesisBlock
+  deriving (Show)
+
+instance Exception NoGenesisBlockException
+
+-- | Get a block from either the immutable DB or immutable DB
+--
+-- Returns 'Nothing' if the block is unknown.
+-- Throws 'NoGenesisBlockException' if the 'Point' refers to the genesis block.
+getAnyBlock :: ( MonadCatch m
+               , MonadSTM m
+               , HasHeader blk
+               )
+            => ImmDB m blk
+            -> VolDB m blk hdr
+            -> Point blk
+            -> m (Maybe blk)
+getAnyBlock immDB volDB point =
+    case Block.pointHash point of
+      GenesisHash ->
+        throwM NoGenesisBlock
+      BlockHash hash -> do
+        isInVolDB <- ($ hash) <$> atomically (VolDB.getIsMember volDB)
+        -- TODO is this the best way to determine whether the volatile or the
+        -- immutable DB should store a block?
+        if isInVolDB
+          then Just <$> VolDB.getKnownBlock volDB hash
+          -- TODO what if the point refers to an EBB? When the hash of the block
+          -- doesn't match that of the point, we know it, but then we need to
+          -- come up with the right EpochNo for the EBB. (Ideally, we just read
+          -- one block instead of two).
+          else ImmDB.getBlock immDB (Right (Block.pointSlot point))

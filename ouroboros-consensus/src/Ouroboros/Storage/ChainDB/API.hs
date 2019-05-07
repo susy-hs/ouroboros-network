@@ -180,6 +180,9 @@ data ChainDB m blk hdr =
       -- then the first block on that fork will become unavailable as soon as
       -- another block is pushed to the current chain and the subsequent
       -- time delay expires.
+      --
+      -- TODO: How should iterators respond to corruption? (Readers can roll
+      -- back, but iterators cannot.)
     , streamBlocks       :: StreamFrom blk -> StreamTo blk -> m (Iterator m blk)
 
       -- | Chain reader

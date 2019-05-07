@@ -179,7 +179,6 @@ streamBlocksAfter db low = wrap <$> streamBlobsAfter db low
         , iteratorID    = ImmDB.DerivedIteratorID $ iteratorID itr
         }
 
-
 -- | Stream blobs after the given point
 --
 -- Our 'Point' based API and the 'SlotNo' + @hash@ based API of the
