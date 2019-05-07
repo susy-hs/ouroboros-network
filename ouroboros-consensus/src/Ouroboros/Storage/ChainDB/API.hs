@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor       #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -17,6 +18,9 @@ module Ouroboros.Storage.ChainDB.API (
   , IteratorId(..)
   , IteratorResult(..)
     -- * Readers
+  , ChainUpdate(..)
+  , fromNetworkChainUpdate
+  , toNetworkChainUpdate
   , Reader(..)
     -- * Recovery
   , ChainDbFailure(..)
@@ -33,8 +37,7 @@ import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
 
 import           Ouroboros.Network.AnchoredFragment (AnchoredFragment)
-import           Ouroboros.Network.Block (ChainUpdate (..), HasHeader (..),
-                     SlotNo, StandardHash)
+import           Ouroboros.Network.Block (HasHeader (..), SlotNo, StandardHash)
 import           Ouroboros.Network.Chain (Chain (..), Point (..))
 import qualified Ouroboros.Network.Chain as Chain
 import           Ouroboros.Network.ChainProducerState (ReaderId)
@@ -45,6 +48,35 @@ import           Ouroboros.Storage.Common
 import qualified Ouroboros.Storage.ImmutableDB as ImmDB
 import qualified Ouroboros.Storage.VolatileDB as VolDB
 
+-- | The chain database
+--
+-- The chain database provides a unified interface on top of
+--
+-- * the immutable DB, storing the part of the chain that can't roll back
+-- * the volatile DB, storing the blocks near the tip of the chain,
+--   possibly in multiple competing forks
+-- * the ledger DB, storing snapshots of the ledger state for blocks in the
+--   immutable DB (and in-memory snapshots for the rest)
+--
+-- In addition to providing a unifying interface on top of these disparate
+-- components, the main responsibilities that the Chain DB itself has are
+--
+-- * Chain selection (on initialization and whenever a block is added)
+-- * Trigger full recovery whenever we detect disk failure in any component
+-- * Provide iterators across fixed fragments of the current chain
+-- * Provide readers that track the status of the current chain
+--
+-- The Chain DB instantiates all the various type parameters of these databases
+-- to conform to the unified interface we provide here. One minor nuisance here
+-- is that we require @HeaderHash blk ~ HeaderHash hdr@ and hence the following
+-- types are all equal
+--
+-- > Point        blk  ;  Point        hdr
+-- > ChainHash    blk  ;  ChainHash    hdr
+-- > ChainUpdate  blk  ;  ChainUpdate  hdr
+--
+-- In the API we offer here we will consistently use the @blk@ versions of
+-- these types and cast only where needed.
 data ChainDB m blk hdr =
     ( HasHeader blk
     , HasHeader hdr
@@ -157,7 +189,10 @@ data ChainDB m blk hdr =
       -- block, or (if we have switched to a fork) the instruction to rollback.
       --
       -- The tracking iterator starts at genesis (see also 'trackForward').
-    , newReader          :: m (Reader m hdr)
+    , readBlocks         :: m (Reader m blk blk)
+
+      -- | Like 'readBlocks', but return headers
+    , readHeaders        :: m (Reader m blk hdr)
 
       -- | Known to be invalid blocks
     , knownInvalidBlocks :: STM m (Set (Point blk))
@@ -235,25 +270,47 @@ data IteratorResult blk =
   | IteratorResult blk
 
 {-------------------------------------------------------------------------------
+  Chain updates
+
+  This is a generalization of 'ChainUpdate' used in the network layer to
+  support a 'Functor' instance.
+-------------------------------------------------------------------------------}
+
+-- | Chain updates returned by readers
+data ChainUpdate blk a =
+    AddBlock a
+  | RollBack (Point blk)
+  deriving (Show, Functor)
+
+fromNetworkChainUpdate :: Chain.ChainUpdate blk -> ChainUpdate blk blk
+fromNetworkChainUpdate = go
+  where
+    go (Chain.AddBlock blk)   = AddBlock blk
+    go (Chain.RollBack point) = RollBack point
+
+toNetworkChainUpdate :: ChainUpdate blk blk -> Chain.ChainUpdate blk
+toNetworkChainUpdate = go
+  where
+    go (AddBlock blk)   = Chain.AddBlock blk
+    go (RollBack point) = Chain.RollBack point
+
+{-------------------------------------------------------------------------------
   Readers
 -------------------------------------------------------------------------------}
 
 -- | Reader
 --
 -- See 'newReader' for more info.
-data Reader m hdr = Reader {
+data Reader m blk a = Reader {
       -- | The next chain update (if one exists)
       --
-      -- > data ChainUpdate hdr = AddBlock hdr
-      -- >                      | RollBack (Point hdr)
+      -- Not in @STM@ because might have to read the headers from disk.
       --
-      -- Does not live in @STM@ because might have to read the headers from disk.
-      --
-      -- We may roll back more than @k@ only in case of data loss.
-      readerInstruction         :: m (Maybe (ChainUpdate hdr))
+      -- We may roll back more than @k@, but only in case of data loss.
+      readerInstruction         :: m (Maybe (ChainUpdate blk a))
 
       -- | Blocking version of 'readerInstruction'
-    , readerInstructionBlocking :: m (ChainUpdate hdr)
+    , readerInstructionBlocking :: m (ChainUpdate blk a)
 
       -- | Move the iterator forward
       --
@@ -268,7 +325,7 @@ data Reader m hdr = Reader {
       --
       -- Cannot live in @STM@ because the points specified might live in the
       -- immutable DB.
-    , readerForward             :: [Point hdr] -> m (Maybe (Point hdr))
+    , readerForward             :: [Point blk] -> m (Maybe (Point blk))
 
       -- | Per-database reader ID
       --
@@ -277,8 +334,9 @@ data Reader m hdr = Reader {
       -- expect to have more than one instance of the 'ChainDB', however.)
     , readerId                  :: ReaderId
     }
+  deriving (Functor)
 
-instance Eq (Reader m hdr) where
+instance Eq (Reader m blk a) where
   (==) = (==) `on` readerId
 
 {-------------------------------------------------------------------------------
@@ -318,7 +376,16 @@ data ChainDbFailure blk =
     -- gets thrown when the block at the given slot (1st argument) in the
     -- immutable DB had another (3rd argument) hash than the expected one (2nd
     -- argument).
-  | ImmDbHashMismatch SlotNo (HeaderHash blk) (HeaderHash blk)
+  | ImmDbHashMismatch (Point blk) (HeaderHash blk) (HeaderHash blk)
+
+    -- | We requested an iterator that was immediately exhausted
+    --
+    -- When we ask the immutable DB for an iterator with a particular start
+    -- position but no stop position, the resulting iterator cannot be
+    -- exhausted immediately: the start position is inclusive, the DB would
+    -- throw an exception if the slot number is beyond the last written block,
+    -- and the DB does not contain any trailing empty slots.
+  | ImmDbUnexpectedIteratorExhausted (Point blk)
 
     -- | The immutable DB threw an "unexpected error"
     --

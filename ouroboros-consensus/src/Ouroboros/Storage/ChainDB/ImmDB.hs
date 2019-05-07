@@ -33,9 +33,7 @@ import           Control.Monad
 import           Data.Bifunctor (first)
 import qualified Data.ByteString as Strict
 import qualified Data.ByteString.Lazy as Lazy
-import           Data.Maybe (isJust)
 import           Data.Proxy
-import           Data.Typeable (Typeable)
 import           Data.Word
 import           System.FilePath ((</>))
 
@@ -123,7 +121,7 @@ openDB args@ImmDbArgs{..} = do
   Getting and parsing blocks
 -------------------------------------------------------------------------------}
 
-getBlockAtTip :: (MonadCatch m, HasHeader blk, Typeable blk)
+getBlockAtTip :: (MonadCatch m, HasHeader blk)
               => ImmDB m blk -> m (Maybe blk)
 getBlockAtTip db = do
     immTip <- withDB db $ \imm -> ImmDB.getTip imm
@@ -135,7 +133,7 @@ getBlockAtTip db = do
 -- | Get known block from the immutable DB that we know should exist
 --
 -- If it does not exist, we are dealing with data corruption.
-getKnownBlock :: (MonadCatch m, HasHeader blk, Typeable blk)
+getKnownBlock :: (MonadCatch m, HasHeader blk)
               => ImmDB m blk -> Either EpochNo SlotNo -> m blk
 getKnownBlock db epochOrSlot = do
     mBlock <- mustExist epochOrSlot <$> getBlock db epochOrSlot
@@ -144,7 +142,7 @@ getKnownBlock db epochOrSlot = do
       Left err -> throwM err
 
 -- | Get block from the immutable DB
-getBlock :: (MonadCatch m, HasHeader blk, Typeable blk)
+getBlock :: (MonadCatch m, HasHeader blk)
          => ImmDB m blk -> Either EpochNo SlotNo -> m (Maybe blk)
 getBlock db epochOrSlot = do
     mBlob <- fmap (parse (decBlock db) epochOrSlot) <$> getBlob db epochOrSlot
@@ -153,7 +151,7 @@ getBlock db epochOrSlot = do
       Just (Right b)  -> return $ Just b
       Just (Left err) -> throwM $ err
 
-getBlob :: (MonadCatch m, HasHeader blk, Typeable blk)
+getBlob :: (MonadCatch m, HasHeader blk)
         => ImmDB m blk -> Either EpochNo SlotNo -> m (Maybe Strict.ByteString)
 getBlob db epochOrSlot = withDB db $ \imm ->
     case epochOrSlot of
@@ -167,7 +165,7 @@ getBlob db epochOrSlot = withDB db $ \imm ->
 -- | Stream blocks after the given point
 --
 -- See also 'streamBlobsAfter'.
-streamBlocksAfter :: forall m blk. (MonadCatch m, HasHeader blk, Typeable blk)
+streamBlocksAfter :: forall m blk. (MonadCatch m, HasHeader blk)
                   => ImmDB m blk
                   -> Point blk -- ^ Exclusive lower bound
                   -> m (Iterator (HeaderHash blk) m blk)
@@ -193,7 +191,7 @@ streamBlocksAfter db low = wrap <$> streamBlobsAfter db low
 -- bound at all; if it doesn't, we pass the hash as the lower bound to the
 -- 'ImmutableDB' and then step the iterator one block to skip that first
 -- block.
-streamBlobsAfter :: forall m blk. (MonadCatch m, HasHeader blk, Typeable blk)
+streamBlobsAfter :: forall m blk. (MonadCatch m, HasHeader blk)
                  => ImmDB m blk
                  -> Point blk -- ^ Exclusive lower bound
                  -> m (Iterator (HeaderHash blk) m Strict.ByteString)
@@ -220,14 +218,17 @@ streamBlobsAfter db low = withDB db $ \imm -> do
             case skipped of
               IteratorResult slot' blk ->
                   unless (hash == hash' && slot == slot') $
-                    throwM $ ImmDbHashMismatch @blk slot hash hash'
+                    throwM $ ImmDbHashMismatch low hash hash'
                 where
                   hash' = blockHash blk
-              IteratorEBB _ hash' _ ->
-                  unless (hash == hash') $ -- TODO check slot?
-                    throwM $ ImmDbHashMismatch @blk slot hash hash'
+              IteratorEBB _epoch hash' _ebb ->
+                  -- We can't easily verify the slot, since all we have is the
+                  -- epoch number. We could do the conversion but it doesn't
+                  -- really matter: the hash uniquely determines the block.
+                  unless (hash == hash') $
+                    throwM $ ImmDbHashMismatch low hash hash'
               IteratorExhausted ->
-                  return ()
+                  throwM $ ImmDbUnexpectedIteratorExhausted low
 
 parseIteratorResult :: (MonadThrow m, HasHeader blk)
                     => ImmDB m blk
@@ -318,7 +319,7 @@ processEpochs _ = \(bs, mErr) ->
 
 -- | Wrap calls to the immutable DB and rethrow exceptions that may indicate
 -- disk failure and should therefore trigger recovery
-withDB :: forall m blk x. (MonadCatch m, HasHeader blk, Typeable blk)
+withDB :: forall m blk x. (MonadCatch m, HasHeader blk)
        => ImmDB m blk -> (ImmutableDB (HeaderHash blk) m -> m x) -> m x
 withDB ImmDB{..} k = catch (k immDB) rethrow
   where

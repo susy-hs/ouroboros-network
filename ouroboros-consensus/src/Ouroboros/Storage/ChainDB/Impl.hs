@@ -229,7 +229,8 @@ openDB args = do
       , getBlock           = cdbGetBlock           env
       , getIsFetched       = cdbGetIsFetched       env
       , streamBlocks       = cdbStreamBlocks       env
-      , newReader          = undefined
+      , readBlocks         = undefined
+      , readHeaders        = undefined
       , knownInvalidBlocks = cdbKnownInvalidBlocks env
       , pointOnChain       = undefined
       }

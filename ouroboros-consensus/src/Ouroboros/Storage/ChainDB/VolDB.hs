@@ -3,6 +3,7 @@
 {-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeApplications          #-}
+{-# LANGUAGE TypeFamilies              #-}
 
 -- | Thin wrapper around the volatile DB
 module Ouroboros.Storage.ChainDB.VolDB (
@@ -37,10 +38,11 @@ import           Control.Monad.Class.MonadST
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
 
-import           Ouroboros.Network.Block (ChainHash (..), HasHeader (..),
+import           Ouroboros.Network.AnchoredFragment (AnchoredFragment)
+import qualified Ouroboros.Network.AnchoredFragment as Fragment
+import           Ouroboros.Network.Block (ChainHash (..), HasHeader (..), Point,
                      StandardHash)
-import           Ouroboros.Network.ChainFragment (ChainFragment)
-import qualified Ouroboros.Network.ChainFragment as Fragment
+import qualified Ouroboros.Network.Block as Block
 
 import qualified Ouroboros.Consensus.Util.CBOR as Util.CBOR
 
@@ -117,34 +119,70 @@ getIsMember db = withSTM db $ VolDB.getIsMember
   Compute candidates
 -------------------------------------------------------------------------------}
 
-candidates :: forall m blk hdr. (MonadCatch m, HasHeader blk, HasHeader hdr)
-           => VolDB m blk hdr -> ChainHash blk -> m [ChainFragment hdr]
+-- | Compute all candidates starting at the specified hash
+--
+-- The fragments returned will be /anchored/ at the specified hash, but not
+-- contain it.
+--
+-- Although the volatile DB keeps a \"successors\" map in memory, telling us the
+-- hashes of the known successors of any block, it does not keep /headers/ in
+-- memory. This means that in order to construct the fragments, we need to
+-- read the blocks from disk and extract their headers. Under normal
+-- circumstances this does not matter too much; although this function gets
+-- called every time we add a block, the expected number of successors is very
+-- small:
+--
+-- * None if we stay on the current chain and this is just the next block
+-- * A handful if we stay on the current chain and the block we just received
+--   was a missing block and we already received some of its successors
+-- * A handful if we switch to a short fork
+--
+-- This is expensive only
+--
+-- * on startup: in this case we need to read at least @k@ blocks from the
+--   volatile DB, and possibly more if there are some other chains in the
+--   volatile DB starting from the tip of the immutable DB
+-- * when we switch to a distant fork
+--
+-- This cost is currently deemed acceptable.
+--
+-- TODO: It might be possible with some low-level hackery to avoid reading
+-- the whole block and read only the header directly.
+--
+-- TODO: We might want to add some microbenchmarking here to measure the cost.
+candidates :: forall m blk hdr.
+              ( MonadCatch m
+              , HasHeader blk
+              , HasHeader hdr
+              , HeaderHash blk ~ HeaderHash hdr
+              )
+           => VolDB m blk hdr -> Point blk -> m [AnchoredFragment hdr]
 candidates db start = do
     hashFragments <- withDB db $ \vol ->
-                       hashes start <$> VolDB.getSuccessors vol
+                       flip hashes (Block.pointHash start) <$>
+                         VolDB.getSuccessors vol
     mapM mkFragments hashFragments
   where
-    -- current chain of headers i memory
-    -- reading the few new blocks from disk is okay
-    -- startup cost does not matters, Duncan is not worried.
-    -- add ticket for tracking the size of our in-memory structures.
+    -- Construct chain fragments from just the hashes
+    --
+    -- This reads blocks (see cost justification, above).
+    mkFragments :: [HeaderHash blk] -> m (AnchoredFragment hdr)
+    mkFragments = fmap (Fragment.fromOldestFirst (Block.castPoint start))
+                . mapM (getKnownHeader db)
 
-    -- 'hashes' constructs a list of hashes. We need to get ChainFragments of
-    -- something that impleemnts HasHeader. Getting there currently requires
-    -- reading blocks. We might need to reconsider this.
-    mkFragments :: [HeaderHash blk] -> m (ChainFragment hdr)
-    mkFragments = fmap (Fragment.fromOldestFirst) . mapM (getKnownHeader db)
-
-    -- Construct fragments of hashes
+    -- List of hashes starting from (but not including) the specified point
     --
     -- We do this as a first step since this is pure function
-    hashes :: ChainHash blk
-           -> (Maybe (HeaderHash blk) -> Set (HeaderHash blk))
+    hashes :: (Maybe (HeaderHash blk) -> Set (HeaderHash blk))
+           -> ChainHash blk
            -> [[HeaderHash blk]]
-    hashes prev succsOf = do
-        next <- Set.toList $ succsOf (fromChainHash prev)
-        rest <- hashes (BlockHash next) succsOf
-        return $ next : rest
+    hashes succsOf = go
+      where
+        go :: ChainHash blk -> [[HeaderHash blk]]
+        go prev = do
+          next <- Set.toList $ succsOf (fromChainHash prev)
+          rest <- go (BlockHash next)
+          return $ next : rest
 
 {-------------------------------------------------------------------------------
   Getting and parsing blocks
@@ -198,9 +236,11 @@ blockFileParser VolDbArgs{..} =
         , bpreBid = fromChainHash (blockPrevHash b)
         }
 
-    -- TODO: This won't be needed anymore after Kostas' next PR
+    -- TODO: This is a workaround. The volatile DB should be polymorphic in the
+    -- error thrown by the parser.
+    -- <https://github.com/input-output-hk/ouroboros-network/issues/488>
     mkErr :: Util.CBOR.ReadIncrementalErr -> VolDB.ParserError (HeaderHash blk)
-    mkErr = undefined
+    mkErr err = VolDB.DecodeFailed (show err) 0
 
 {-------------------------------------------------------------------------------
   Error handling
@@ -219,8 +259,6 @@ withDB VolDB{..} k = catch (k volDB) rethrow
                     Just err' -> throwM err'
                     Nothing   -> throwM err
 
-    -- We might have to revisit this
-    -- See also https://github.com/input-output-hk/ouroboros-network/issues/428
     wrap :: VolatileDBError (HeaderHash blk) -> Maybe (ChainDbFailure blk)
     wrap (VolDB.UnexpectedError err) = Just (VolDbFailure err)
     wrap VolDB.UserError{}           = Nothing
