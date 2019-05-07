@@ -5,6 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE UndecidableInstances       #-}
 
 {-# OPTIONS_GHC -Wredundant-constraints #-}
 module Ouroboros.Consensus.ChainSyncClient (
@@ -15,6 +16,7 @@ module Ouroboros.Consensus.ChainSyncClient (
   , CandidateState (..)
   ) where
 
+import           Codec.Serialise (encode)
 import           Control.Monad
 import           Control.Monad.Except
 import           Control.Tracer
@@ -69,7 +71,7 @@ data ChainSyncClientException blk hdr =
     | ForkTooDeep (Point hdr) (Point hdr)
 
       -- | The ledger threw an error.
-    | LedgerError (LedgerError blk)
+    | ChainError (ValidationErr (BlockProtocol hdr))
 
       -- | The upstream node rolled back more than @k@ blocks.
       --
@@ -85,16 +87,20 @@ data ChainSyncClientException blk hdr =
     | InvalidIntersection (Point hdr)
 
 
-deriving instance (StandardHash hdr, Show (LedgerError blk))
+deriving instance ( StandardHash hdr, Show (LedgerError blk)
+                  , OuroborosTag (BlockProtocol hdr)
+                  )
     => Show (ChainSyncClientException blk hdr)
 
-instance (Typeable hdr, Typeable blk, StandardHash hdr, Show (LedgerError blk))
+instance ( Typeable hdr, Typeable blk, StandardHash hdr
+         , Show (LedgerError blk), OuroborosTag (BlockProtocol hdr)
+         )
     => Exception (ChainSyncClientException blk hdr)
 
 -- | The state of the candidate chain synched with an upstream node.
-data CandidateState blk hdr = CandidateState
+data CandidateState hdr = CandidateState
     { candidateChain       :: !(AnchoredFragment hdr)
-    , candidateHeaderState :: !(HeaderState blk)
+    , candidateChainState  :: !(ChainState (BlockProtocol hdr))
       -- ^ 'HeaderState' corresponding to the tip (most recent block) of the
       -- 'candidateChain'.
     }
@@ -120,7 +126,7 @@ chainSyncClient
     -> ClockSkew                     -- ^ Maximum clock skew
     -> STM m (AnchoredFragment hdr)  -- ^ Get the current chain
     -> STM m (ExtLedgerState blk)    -- ^ Get the current ledger state
-    -> TVar m (Map up (TVar m (CandidateState blk hdr)))
+    -> TVar m (Map up (TVar m (CandidateState hdr)))
        -- ^ The candidate chains, we need the whole map because we
        -- (de)register nodes (@up@).
     -> up -> Consensus ChainSyncClient hdr m
@@ -141,7 +147,7 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
     -- We also validate the headers of a candidate chain by advancing the
     -- 'HeaderState' with the headers, which returns an error when validation
     -- failed. Thus, in addition to the chain fragment of each candidate, we
-    -- also store a 'HeaderState' corresponding to the head of the candidate
+    -- also store a 'ChainState' corresponding to the head of the candidate
     -- chain.
     --
     -- We must keep the candidate chain synchronised with the corresponding
@@ -176,12 +182,12 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
     initialise = do
       (curChain, varCandidate) <- atomically $ do
         curChain  <- getCurrentChain
-        curLedger <- ledgerState <$> getCurrentLedger
+        curChainState <- ouroborosChainState <$> getCurrentLedger
         -- We use our current chain, which contains the last @k@ headers, as
         -- the initial chain for the candidate.
         varCandidate <- newTVar CandidateState
           { candidateChain       = curChain
-          , candidateHeaderState = getHeaderState curLedger 0
+          , candidateChainState  = curChainState
           }
         modifyTVar' varCandidates $ Map.insert up varCandidate
         return (curChain, varCandidate)
@@ -205,33 +211,29 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
         }
 
     -- One of the points we sent intersected our chain
-    intersectImproved :: TVar m (CandidateState blk hdr)
+    intersectImproved :: TVar m (CandidateState hdr)
                       -> Point hdr -> Point hdr
                       -> m (Consensus ClientStIdle hdr m)
     intersectImproved varCandidate intersection _theirHead = atomically $ do
-      -- TODO #472
-      curLedger <- ledgerState <$> getCurrentLedger
 
-      CandidateState { candidateChain } <- readTVar varCandidate
+      CandidateState { candidateChain, candidateChainState } <- readTVar varCandidate
       -- Roll back the candidate to the @intersection@.
-      candidateChain' <- case AF.rollback intersection candidateChain of
-        Just c  -> return c
-        -- The @intersection@ is not on the candidate chain, even though we
-        -- sent only points from the candidate chain to find an intersection
-        -- with. The node must have sent us an invalid intersection point.
-        Nothing -> disconnect $ InvalidIntersection intersection
-
-      -- Get the HeaderState corresponding to point/block/header we rolled
-      -- back to.
-      let candidateHeaderState' =
-            getHeaderStateFor curLedger candidateChain candidateChain'
+      (candidateChain', candidateChainState') <-
+        case (,) <$> AF.rollback intersection candidateChain
+                 <*> rewindChainState cfg candidateChainState (pointSlot intersection)
+        of
+          Just (c,d)  -> return (c,d)
+          -- The @intersection@ is not on the candidate chain, even though we
+          -- sent only points from the candidate chain to find an intersection
+          -- with. The node must have sent us an invalid intersection point.
+          Nothing -> disconnect $ InvalidIntersection intersection
 
       -- TODO make sure the header state is fully evaluated, otherwise we'd
       -- hang on to the entire ledger state. This applies to everywhere we
       -- update the header state.
       writeTVar varCandidate CandidateState
         { candidateChain       = candidateChain'
-        , candidateHeaderState = candidateHeaderState'
+        , candidateChainState = candidateChainState'
         }
       return $ requestNext varCandidate
 
@@ -243,12 +245,11 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
     -- we later optimise this client to also find intersections after
     -- start-up, this code will have to be adapted, as it assumes it is only
     -- called at start-up.
-    intersectUnchanged :: TVar m (CandidateState blk hdr)
+    intersectUnchanged :: TVar m (CandidateState hdr)
                        -> Point hdr
                        -> m (Consensus ClientStIdle hdr m)
     intersectUnchanged varCandidate theirHead = atomically $ do
-      -- TODO #472
-      curLedger <- ledgerState <$> getCurrentLedger
+      curChainState <- ouroborosChainState <$> getCurrentLedger
 
       CandidateState { candidateChain } <- readTVar varCandidate
       -- If the genesis point is within the bounds of the candidate fragment
@@ -262,76 +263,85 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
 
       -- Get the 'HeaderState' at genesis (0).
       let candidateChain' = Empty genesisPoint
-          candidateHeaderState' =
-            getHeaderStateFor curLedger candidateChain candidateChain'
+
+      candidateChainState' <- case rewindChainState cfg curChainState (SlotNo 0) of
+        Nothing -> disconnect $ ForkTooDeep genesisPoint theirHead
+        Just c -> pure c
 
       writeTVar varCandidate CandidateState
         { candidateChain       = candidateChain'
-        , candidateHeaderState = candidateHeaderState'
+        , candidateChainState  = candidateChainState'
         }
       return $ requestNext varCandidate
 
-    requestNext :: TVar m (CandidateState blk hdr)
+    requestNext :: TVar m (CandidateState hdr)
                 -> Consensus ClientStIdle hdr m
     requestNext varCandidate = SendMsgRequestNext
       (handleNext varCandidate)
       (return (handleNext varCandidate)) -- when we have to wait
 
-    handleNext :: TVar m (CandidateState blk hdr)
+    handleNext :: TVar m (CandidateState hdr)
                -> Consensus ClientStNext hdr m
     handleNext varCandidate = ClientStNext
       { recvMsgRollForward  = ChainSyncClient .: rollForward  varCandidate
       , recvMsgRollBackward = ChainSyncClient .: rollBackward varCandidate
       }
 
-    rollForward :: TVar m (CandidateState blk hdr)
+    rollForward :: TVar m (CandidateState hdr)
                 -> hdr -> Point hdr
                 -> m (Consensus ClientStIdle hdr m)
     rollForward varCandidate hdr theirHead = atomically $ do
       currentSlot <- getCurrentSlot btime
+      -- TODO #472
+      curLedger <- ledgerState <$> getCurrentLedger
       let theirSlot = AF.pointSlot theirHead
 
       when (unSlotNo theirSlot > unSlotNo currentSlot + maxSkew) $
         disconnect $ TooFarInTheFuture theirSlot currentSlot
 
-      -- TODO #472
-      curLedger <- ledgerState <$> getCurrentLedger
-
       CandidateState {..} <- readTVar varCandidate
 
-      candidateHeaderState' <-
-        case runExcept $ advanceHeader curLedger hdr candidateHeaderState of
-          Left ledgerError            -> disconnect $ LedgerError ledgerError
-          Right candidateHeaderState' -> return candidateHeaderState'
+      ledgerView <-
+        case
+          atSlot theirSlot =<< anachronisticProtocolLedgerView cfg curLedger theirSlot
+        of
+          Nothing -> disconnect $ TooFarInTheFuture theirSlot currentSlot
+          Just lv -> pure lv
+
+      candidateChainState' <-
+        case runExcept $ applyChainState encode cfg ledgerView hdr candidateChainState of
+          Left vErr -> disconnect $ ChainError vErr
+          Right candidateChainState' -> return candidateChainState'
+
       writeTVar varCandidate CandidateState
         { candidateChain       = candidateChain :> hdr
-        , candidateHeaderState = candidateHeaderState'
+        , candidateChainState = candidateChainState'
         }
       return $ requestNext varCandidate
 
-    rollBackward :: TVar m (CandidateState blk hdr)
+    rollBackward :: TVar m (CandidateState hdr)
                  -> Point hdr -> Point hdr
                  -> m (Consensus ClientStIdle hdr m)
     rollBackward varCandidate intersection theirHead = atomically $ do
       CandidateState {..} <- readTVar varCandidate
-      candidateChain' <- case AF.rollback intersection candidateChain of
-        Just candidateChain' -> return candidateChain'
-        -- TODO This is not correct, this limits their rollback to the point
-        -- where we started talking to them. It's entirely possible that we
-        -- don't have many of their blocks yet, and now they roll back more
-        -- than that number of blocks. Indeed, we might even just have one
-        -- block, and they might roll back two.
-        Nothing              -> disconnect $
-          InvalidRollBack intersection theirHead
+      let theirSlot = AF.pointSlot theirHead
 
-      -- TODO #472
-      curLedger <- ledgerState <$> getCurrentLedger
+      (candidateChain', candidateChainState') <-
+        case (,) <$> AF.rollback intersection candidateChain
+                 <*> rewindChainState cfg candidateChainState (pointSlot intersection)
+        of
+          Just (c,d)  -> return (c,d)
+          -- TODO This is not correct, this limits their rollback to the point
+          -- where we started talking to them. It's entirely possible that we
+          -- don't have many of their blocks yet, and now they roll back more
+          -- than that number of blocks. Indeed, we might even just have one
+          -- block, and they might roll back two.
+          Nothing              -> disconnect $
+            InvalidRollBack intersection theirHead
 
-      let candidateHeaderState' =
-            getHeaderStateFor curLedger candidateChain candidateChain'
       writeTVar varCandidate CandidateState
         { candidateChain       = candidateChain'
-        , candidateHeaderState = candidateHeaderState'
+        , candidateChainState = candidateChainState'
         }
       return $ requestNext varCandidate
 
@@ -341,21 +351,6 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
     disconnect ex = do
       modifyTVar' varCandidates $ Map.delete up
       throwM ex
-
-    -- | Get the 'HeaderState' for the head of the given chain.
-    getHeaderStateFor
-      :: LedgerState blk
-      -> AnchoredFragment hdr
-         -- ^ The ledger state corresponds to the head of this chain
-      -> AnchoredFragment hdr
-         -- ^ We want the ledger state for the head of this chain
-      -> HeaderState blk
-    getHeaderStateFor ledgerState ledgerChain wantedChain =
-        getHeaderState ledgerState rollBack
-      where
-        ledgerHeadBlockNo = mostRecentBlockNo ledgerChain
-        wantedHeadBlockNo = mostRecentBlockNo wantedChain
-        rollBack = unBlockNo ledgerHeadBlockNo - unBlockNo wantedHeadBlockNo
 
     -- | Return the 'BlockNo' of the most recent header of the given chain,
     -- the one at the tip. If the fragment is empty, it must be that we're
