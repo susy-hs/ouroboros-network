@@ -14,8 +14,11 @@ import qualified Data.Binary.Put as Bin
 import           Data.Bits
 import qualified Data.ByteString.Lazy as BL
 import           Data.Word
+import           GHC.Stack
 
+import           Control.Monad.Class.MonadFork
 import           Control.Monad.Class.MonadSTM
+import           Control.Monad.Class.MonadTime
 
 import           Ouroboros.Network.Mux.Types
 
@@ -134,27 +137,29 @@ encodeMuxSDU sdu =
 -- shared FIFO that contains the items of work. This is processed so
 -- that each active demand gets a `maxSDU`s work of data processed
 -- each time it gets to the front of the queue
-mux :: (MonadSTM m)
-     => TVar m Int
+mux :: (MonadFork m, MonadSTM m)
+     => (DiffTime -> CallStack -> m ())
+     -> TVar m Int
      -> PerMuxSharedState ptcl m
      -> m ()
-mux cnt pmss = do
+mux kick cnt pmss = do
     w <- atomically $ readTBQueue $ tsrQueue pmss
     case w of
-         TLSRDemand mid md d -> processSingleWanton pmss mid md d cnt >> mux cnt pmss
+         TLSRDemand mid md d -> processSingleWanton kick pmss mid md d cnt >> mux kick cnt pmss
 
 -- | Pull a `maxSDU`s worth of data out out the `Wanton` - if there is
 -- data remaining requeue the `TranslocationServiceRequest` (this
 -- ensures that any other items on the queue will get some service
 -- first.
-processSingleWanton :: MonadSTM m
-                    => PerMuxSharedState ptcl m
+processSingleWanton :: (MonadSTM m, MonadFork m, HasCallStack)
+                    => (DiffTime -> CallStack -> m ())
+                    -> PerMuxSharedState ptcl m
                     -> MiniProtocolId ptcl
                     -> MiniProtocolMode
                     -> Wanton m
                     -> TVar m Int
                     -> m ()
-processSingleWanton pmss mpi md wanton cnt = do
+processSingleWanton kick pmss mpi md wanton cnt = do
     maxSDU <- sduSize $ bearer pmss
     blob <- atomically $ do
       -- extract next SDU
@@ -171,6 +176,8 @@ processSingleWanton pmss mpi md wanton cnt = do
       -- return data to send
       pure frag
     let sdu = MuxSDU (RemoteClockModel 0) mpi md (fromIntegral $ BL.length blob) blob
+    kick 1 callStack -- XXX
     void $ write (bearer pmss) sdu
+    kick 0 callStack
     atomically $ modifyTVar' cnt (\a -> a - 1)
     --paceTransmission tNow

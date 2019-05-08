@@ -65,6 +65,7 @@ library
                        Ouroboros.Network.Protocol.BlockFetch.Client
                        Ouroboros.Network.Protocol.BlockFetch.Server
                        Ouroboros.Network.Protocol.BlockFetch.Codec
+                       Ouroboros.Network.Watchdog
   default-language:    Haskell2010
   other-extensions:    BangPatterns,
                        DataKinds,
@@ -169,6 +170,7 @@ test-suite tests
                        Ouroboros.Network.Socket
                        Ouroboros.Network.Server.Socket
                        Ouroboros.Network.Time
+                       Ouroboros.Network.Watchdog
 
                        Test.AnchoredFragment
                        Test.Chain

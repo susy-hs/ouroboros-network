@@ -26,6 +26,7 @@ import           Control.Monad.Class.MonadFork
 import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
+import           Control.Monad.Class.MonadTimer
 import           Data.Array
 import qualified Data.ByteString.Lazy as BL
 import           Data.Maybe (catMaybes)
@@ -35,13 +36,14 @@ import           Ouroboros.Network.Channel
 import           Ouroboros.Network.Mux.Egress
 import           Ouroboros.Network.Mux.Ingress
 import           Ouroboros.Network.Mux.Types
+import           Ouroboros.Network.Watchdog
 
 -- | muxStart starts a mux bearer for the specified protocols corresponding to
 -- one of the provided Versions.
 -- TODO: replace MonadSay with iohk-monitoring-framework.
 muxStart :: forall m ptcl.
             ( MonadAsync m, MonadFork m, MonadSay m, MonadSTM m, MonadThrow m , MonadMask m
-            , Ord ptcl, Enum ptcl, Bounded ptcl)
+            , MonadTimer m, Ord ptcl, Enum ptcl, Bounded ptcl)
          => MiniProtocolDescriptions ptcl m
          -> MuxBearer ptcl m
          -> m ()
@@ -49,10 +51,12 @@ muxStart udesc bearer = do
     tbl <- setupTbl
     tq <- atomically $ newTBQueue 100
     cnt <- newTVarM 0
+    (wdq, kick) <- setupWatchdog
 
     let pmss = PerMuxSS tbl tq bearer
-        jobs = [ demux pmss
-               , mux cnt pmss
+        jobs = [ watchDog wdq
+               , demux pmss
+               , mux kick cnt pmss
                , muxControl pmss ModeResponder
                , muxControl pmss ModeInitiator
                ]
