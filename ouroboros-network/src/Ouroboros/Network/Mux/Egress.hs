@@ -137,13 +137,15 @@ encodeMuxSDU sdu =
 -- shared FIFO that contains the items of work. This is processed so
 -- that each active demand gets a `maxSDU`s work of data processed
 -- each time it gets to the front of the queue
-mux :: (MonadFork m, MonadSTM m)
+mux :: (MonadFork m, MonadSTM m, HasCallStack)
      => (DiffTime -> CallStack -> m ())
      -> TVar m Int
      -> PerMuxSharedState ptcl m
      -> m ()
 mux kick cnt pmss = do
+    kick muxLongTimeout callStack
     w <- atomically $ readTBQueue $ tsrQueue pmss
+    kick muxShortTimeout callStack
     case w of
          TLSRDemand mid md d -> processSingleWanton kick pmss mid md d cnt >> mux kick cnt pmss
 
@@ -176,8 +178,7 @@ processSingleWanton kick pmss mpi md wanton cnt = do
       -- return data to send
       pure frag
     let sdu = MuxSDU (RemoteClockModel 0) mpi md (fromIntegral $ BL.length blob) blob
-    kick 1 callStack -- XXX
+    kick muxShortTimeout callStack
     void $ write (bearer pmss) sdu
-    kick 0 callStack
     atomically $ modifyTVar' cnt (\a -> a - 1)
     --paceTransmission tNow

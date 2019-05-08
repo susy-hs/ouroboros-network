@@ -17,8 +17,10 @@ import qualified Data.ByteString.Lazy as BL
 import           Data.Array
 import           GHC.Stack
 
+import           Control.Monad.Class.MonadFork
 import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadSTM
+import           Control.Monad.Class.MonadTime
 
 import           Ouroboros.Network.Mux.Types
 
@@ -103,17 +105,19 @@ decodeMuxSDUHeader buf =
 
 -- | demux runs as a single separate thread and reads complete 'MuxSDU's from the underlying
 -- Mux Bearer and forwards it to the matching ingress queue.
-demux :: (MonadSTM m, MonadSay m, Ord ptcl, Enum ptcl)
-      => PerMuxSharedState ptcl m -> m ()
-demux pmss = forever $ do
+demux :: (MonadFork m, MonadSTM m, MonadSay m, Ord ptcl, Enum ptcl, HasCallStack)
+      => (DiffTime -> CallStack -> m ()) -> PerMuxSharedState ptcl m -> m ()
+demux kick pmss = forever $ do
     -- Note:
     -- This reads in an infinite loop, which causes an error when a terminating
     -- message is received, since we'll try to read after receiving it.  When
     -- this happens @'Ouroboros.Network.Socket.socketAsMuxBearer'@ throws an
     -- exception.
+    kick muxLongTimeout callStack
     (sdu, _) <- Ouroboros.Network.Mux.Types.read $ bearer pmss
     --say $ printf "demuxing sdu on mid %s mode %s" (show $ msId sdu) (show $ msMode sdu)
     -- Notice the mode reversal, ModeResponder is delivered to ModeInitiator and vice versa.
+    kick muxShortTimeout callStack
     atomically $ writeTBQueue (ingressQueue (dispatchTable pmss) (msId sdu) (negMiniProtocolMode $ msMode sdu)) (msBlob sdu)
 
 -- | Return the ingress queueu for a given 'MiniProtocolId' and 'MiniProtocolMode'.

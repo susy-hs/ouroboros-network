@@ -55,7 +55,7 @@ muxStart udesc bearer = do
 
     let pmss = PerMuxSS tbl tq bearer
         jobs = [ watchDog wdq
-               , demux pmss
+               , demux kick pmss
                , mux kick cnt pmss
                , muxControl pmss ModeResponder
                , muxControl pmss ModeInitiator

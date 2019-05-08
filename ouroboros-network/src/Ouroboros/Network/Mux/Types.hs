@@ -20,6 +20,8 @@ module Ouroboros.Network.Mux.Types (
     , RemoteClockModel (..)
     , TranslocationServiceRequest (..)
     , Wanton (..)
+    , muxShortTimeout
+    , muxLongTimeout
     ) where
 
 import           Control.Exception
@@ -36,6 +38,14 @@ import           Ouroboros.Network.Channel
 
 newtype RemoteClockModel = RemoteClockModel { unRemoteClockModel :: Word32 } deriving Eq
 
+-- For operations that should complete in a reasonable time, for example sending a single SDU.
+muxShortTimeout :: DiffTime
+muxShortTimeout = 15
+
+-- For operations that should complete in this time if the MuxBearer is alive.
+-- Should be larger than future DeltaQ/Peer discovery keep-alive interval
+muxLongTimeout :: DiffTime
+muxLongTimeout = 60
 
 --
 -- Mini-protocol numbers
