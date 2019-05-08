@@ -1,6 +1,6 @@
 { system, compiler, flags, pkgs, hsPkgs, pkgconfPkgs, ... }:
   {
-    flags = { ipv6 = false; };
+    flags = { ipv6 = false; cddl = false; };
     package = {
       specVersion = "1.10";
       identifier = { name = "ouroboros-network"; version = "0.1.0.0"; };
@@ -38,23 +38,6 @@
           (hsPkgs.text)
           ];
         };
-      exes = {
-        "test-cddl" = {
-          depends = [
-            (hsPkgs.base)
-            (hsPkgs.bytestring)
-            (hsPkgs.cborg)
-            (hsPkgs.fingertree)
-            (hsPkgs.hashable)
-            (hsPkgs.process-extras)
-            (hsPkgs.serialise)
-            (hsPkgs.text)
-            (hsPkgs.io-sim-classes)
-            (hsPkgs.ouroboros-network-testing)
-            (hsPkgs.typed-protocols)
-            ];
-          };
-        };
       tests = {
         "tests" = {
           depends = [
@@ -85,6 +68,21 @@
             (hsPkgs.tasty-quickcheck)
             (hsPkgs.text)
             (hsPkgs.time)
+            ];
+          };
+        "cddl" = {
+          depends = [
+            (hsPkgs.base)
+            (hsPkgs.bytestring)
+            (hsPkgs.cborg)
+            (hsPkgs.fingertree)
+            (hsPkgs.hashable)
+            (hsPkgs.process-extras)
+            (hsPkgs.serialise)
+            (hsPkgs.text)
+            (hsPkgs.io-sim-classes)
+            (hsPkgs.ouroboros-network-testing)
+            (hsPkgs.typed-protocols)
             ];
           };
         };
