@@ -7,18 +7,17 @@ module Ouroboros.Network.BlockFetch.DeltaQ (
     Distribution,
     DeltaQ,
     PeerGSV(..),
-    estimateBlockFetchResponse,
-    blockArrivalShedule,
+    SizeInBytes,
     PeerFetchInFlightLimits(..),
     calculatePeerFetchInFlightLimits,
+--    estimateBlockFetchResponse,
+--    blockArrivalShedule,
   ) where
 
 import           Data.Fixed as Fixed (Pico)
 import           Control.Monad.Class.MonadTime
 
 import           Ouroboros.Network.DeltaQ
-import           Ouroboros.Network.BlockFetch.Types
-                   ( PeerFetchInFlight(..) )
 
 
 data PeerFetchInFlightLimits = PeerFetchInFlightLimits {
@@ -79,6 +78,7 @@ calculatePeerFetchInFlightLimits PeerGSV {
     inFlightBytesHighWatermark = inFlightBytesLowWatermark * 2
 
 
+{-
 estimateBlockFetchResponse :: PeerGSV
                            -> PeerFetchInFlight header
                            -> [SizeInBytes]
@@ -108,4 +108,4 @@ blockArrivalShedule gsvs
     reqSize = 100 -- not exact, but it's small
 
     cumulativeSumFrom n = tail . scanl (+) n
-
+-}

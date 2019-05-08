@@ -3,7 +3,7 @@
     flags = {};
     package = {
       specVersion = "1.10";
-      identifier = { name = "transformers-lift"; version = "0.2.0.1"; };
+      identifier = { name = "transformers-lift"; version = "9999"; };
       license = "BSD-3-Clause";
       copyright = "";
       maintainer = "Vladislav Zavialov <vlad.z.4096@gmail.com>";
@@ -25,8 +25,8 @@
       };
     } // {
     src = (pkgs.lib).mkDefault (pkgs.fetchgit {
-      url = "https://github.com/int-index/transformers-lift";
-      rev = "002555ea49ea7e76b401d09ab7367f3d5e582d70";
-      sha256 = "0ryxm2i1w97f8gzlpvpcpn03aa16icb3hnn9qb29sny46wfsgg3n";
+      url = "https://github.com/input-output-hk/transformers-lift.git";
+      rev = "c830bc7e7e41895e3c50488a92d34405b68b4ad8";
+      sha256 = "022iiq9bg3kczv1awqzjllz6rd1dzcai9kivz26i8adnicp9b8xl";
       });
     }

@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE NamedFieldPuns             #-}
 {-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE StandaloneDeriving         #-}
@@ -31,16 +32,21 @@ module Ouroboros.Consensus.Ledger.Mock (
   , SimplePreHeader(..)
   , SimpleBody(..)
   , forgeBlock
+  , blockMatchesHeader
     -- * Updating the Ledger state
   , LedgerState(..)
+  , HeaderState(..)
   , AddrDist
   , relativeStakes
   , totalStakes
   ) where
 
+import           Codec.CBOR.Decoding (decodeListLenOf)
+import           Codec.CBOR.Encoding (encodeListLen)
 import           Codec.Serialise
 import           Control.Monad.Except
 import           Crypto.Random (MonadRandom)
+import qualified Data.ByteString.Lazy as BL
 import           Data.FingerTree (Measured (measure))
 import qualified Data.IntMap.Strict as IntMap
 import           Data.Map (Map)
@@ -48,6 +54,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Proxy
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Typeable (Typeable)
 import           GHC.Generics (Generic)
 
 import           Ouroboros.Network.Block
@@ -62,6 +69,7 @@ import           Ouroboros.Consensus.Protocol.Abstract
 import           Ouroboros.Consensus.Protocol.BFT
 import           Ouroboros.Consensus.Protocol.ExtNodeConfig
 import           Ouroboros.Consensus.Protocol.LeaderSchedule
+import           Ouroboros.Consensus.Protocol.PBFT
 import           Ouroboros.Consensus.Protocol.Praos
 import           Ouroboros.Consensus.Util
 import           Ouroboros.Consensus.Util.Condense
@@ -159,7 +167,7 @@ instance All HasUtxo as => HasUtxo (HList as) where
 
 -------------------------------------------------------------------------------}
 
-class HashAlgorithm (SimpleBlockHash c) => SimpleBlockCrypto c where
+class (HashAlgorithm (SimpleBlockHash c), Typeable c) => SimpleBlockCrypto c where
   type family SimpleBlockHash c :: *
 
 data SimpleBlockStandardCrypto
@@ -183,12 +191,27 @@ instance SimpleBlockCrypto SimpleBlockMockCrypto where
 data SimpleHeader p c = SimpleHeader {
       headerPreHeader :: SimplePreHeader p c
     , headerOuroboros :: Payload p (SimplePreHeader p c)
+    , headerHash      :: Hash (SimpleBlockHash c) (SimpleHeader p c)
     }
   deriving (Generic)
 
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Show (Payload p (SimplePreHeader p c))) => Show (SimpleHeader p c)
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Eq (Payload p (SimplePreHeader p c))) => Eq   (SimpleHeader p c)
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Ord (Payload p (SimplePreHeader p c))) => Ord  (SimpleHeader p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Show (Payload p (SimplePreHeader p c))) => Show (SimpleHeader p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Eq   (Payload p (SimplePreHeader p c))) => Eq   (SimpleHeader p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Ord  (Payload p (SimplePreHeader p c))) => Ord  (SimpleHeader p c)
+
+mkSimpleHeader
+  :: (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c)))
+  => SimplePreHeader p c
+  -> Payload p (SimplePreHeader p c)
+  -> SimpleHeader p c
+mkSimpleHeader preHeader payload =
+    headerWoHash { headerHash = hash headerWoHash }
+  where
+    headerWoHash = SimpleHeader
+      { headerPreHeader = preHeader
+      , headerOuroboros = payload
+      , headerHash      = error "Hash used before it was computed"
+      }
 
 -- | The preheader is the header without the ouroboros protocol specific payload
 --
@@ -196,14 +219,15 @@ deriving instance (SimpleBlockCrypto c, OuroborosTag p, Ord (Payload p (SimplePr
 -- (to wit, the pre header plus some ouroboros specific stuff but, crucially,
 -- without the signature itself).
 data SimplePreHeader p c = SimplePreHeader {
-      headerPrev     :: ChainHash (SimpleHeader p c)
-    , headerSlot     :: SlotNo
-    , headerBlockNo  :: BlockNo
-    , headerBodyHash :: Hash (SimpleBlockHash c) SimpleBody
+      headerPrev      :: ChainHash (SimpleHeader p c)
+    , headerSlot      :: SlotNo
+    , headerBlockNo   :: BlockNo
+    , headerBodyHash  :: Hash (SimpleBlockHash c) SimpleBody
+    , headerBlockSize :: Word
     }
   deriving (Generic, Show, Eq, Ord)
 
-instance SimpleBlockCrypto c => Condense (SimplePreHeader p c) where
+instance (Typeable p, SimpleBlockCrypto c) => Condense (SimplePreHeader p c) where
     condense = show
 
 data SimpleBody = SimpleBody { getSimpleBody :: Map (Hash ShortHash Tx) Tx }
@@ -215,16 +239,29 @@ data SimpleBlock p c = SimpleBlock {
     }
   deriving (Generic)
 
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Show (Payload p (SimplePreHeader p c))) => Show (SimpleBlock p c)
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Eq (Payload p (SimplePreHeader p c))) => Eq (SimpleBlock p c)
-deriving instance (SimpleBlockCrypto c, OuroborosTag p, Ord (Payload p (SimplePreHeader p c))) => Ord (SimpleBlock p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Show (Payload p (SimplePreHeader p c))) => Show (SimpleBlock p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Eq (Payload p (SimplePreHeader p c))) => Eq (SimpleBlock p c)
+deriving instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Ord (Payload p (SimplePreHeader p c))) => Ord (SimpleBlock p c)
 
-instance (SimpleBlockCrypto c, OuroborosTag p, Condense (Payload p (SimplePreHeader p c)), Serialise (Payload p (SimplePreHeader p c))) => Condense (SimpleBlock p c) where
-  condense (SimpleBlock hdr@(SimpleHeader _ pl) (SimpleBody txs)) = mconcat [
+instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Condense (Payload p (SimplePreHeader p c)), Serialise (Payload p (SimplePreHeader p c))) => Condense (SimpleHeader p c) where
+  condense hdr@(SimpleHeader _ pl bh) = mconcat [
         "("
       , condensedHash (blockPrevHash hdr)
       , "->"
-      , condense (blockHash hdr)
+      , condense bh
+      , ","
+      , condense pl
+      , ","
+      , condense (unSlotNo $ blockSlot hdr)
+      , ")"
+      ]
+
+instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Condense (Payload p (SimplePreHeader p c)), Serialise (Payload p (SimplePreHeader p c))) => Condense (SimpleBlock p c) where
+  condense (SimpleBlock hdr@(SimpleHeader _ pl bh) (SimpleBody txs)) = mconcat [
+        "("
+      , condensedHash (blockPrevHash hdr)
+      , "->"
+      , condense bh
       , ","
       , condense pl
       , ","
@@ -245,10 +282,10 @@ instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHe
   measure = blockMeasure
 
 
-instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => HasHeader (SimpleHeader p c) where
+instance (Typeable p, SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => HasHeader (SimpleHeader p c) where
   type HeaderHash (SimpleHeader p c) = Hash (SimpleBlockHash c) (SimpleHeader p c)
 
-  blockHash      = hash
+  blockHash      = headerHash
   blockPrevHash  = headerPrev    . headerPreHeader
   blockSlot      = headerSlot    . headerPreHeader
   blockNo        = headerBlockNo . headerPreHeader
@@ -267,8 +304,8 @@ instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHe
        blockInvariant simpleHeader
     && hash simpleBody == headerBodyHash (headerPreHeader simpleHeader)
 
-instance SimpleBlockCrypto c => StandardHash (SimpleHeader p c)
-instance SimpleBlockCrypto c => StandardHash (SimpleBlock  p c)
+instance (Typeable p, SimpleBlockCrypto c) => StandardHash (SimpleHeader p c)
+instance (Typeable p, SimpleBlockCrypto c) => StandardHash (SimpleBlock  p c)
 
 {-------------------------------------------------------------------------------
   Creating blocks
@@ -289,28 +326,43 @@ forgeBlock :: forall m p c.
            -> IsLeader p
            -> m (SimpleBlock p c)
 forgeBlock cfg curSlot curNo prevHash txs proof = do
-    ouroborosPayload <- mkPayload cfg proof preHeader
+    ouroborosPayload <- mkPayload encode cfg proof preHeader
     return $ SimpleBlock {
-        simpleHeader = SimpleHeader preHeader ouroborosPayload
+        simpleHeader = mkSimpleHeader preHeader ouroborosPayload
       , simpleBody   = body
       }
   where
     body :: SimpleBody
     body = SimpleBody txs
 
+    -- We use the size of the body, not of the whole block (= header + body),
+    -- since the header size is fixed and this size is only used for
+    -- prioritisation.
+    bodySize :: Word
+    bodySize = fromIntegral $ BL.length $ serialise body
+
     preHeader :: SimplePreHeader p c
     preHeader = SimplePreHeader {
-          headerPrev     = prevHash
-        , headerSlot     = curSlot
-        , headerBlockNo  = curNo
-        , headerBodyHash = hash body
+          headerPrev      = prevHash
+        , headerSlot      = curSlot
+        , headerBlockNo   = curNo
+        , headerBodyHash  = hash body
+        , headerBlockSize = bodySize
         }
+
+-- | Check whether the block matches the header
+blockMatchesHeader :: SimpleBlockCrypto c => SimpleHeader p c -> SimpleBlock p c -> Bool
+blockMatchesHeader SimpleHeader { headerPreHeader } SimpleBlock { simpleBody } =
+    headerBodyHash headerPreHeader == hash simpleBody
 
 {-------------------------------------------------------------------------------
   Updating the Ledger
 -------------------------------------------------------------------------------}
 
 type instance BlockProtocol (SimpleBlock p c) = p
+
+type instance BlockProtocol (SimpleHeader p c) = p
+
 
 instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c)))
       => HasPreHeader (SimpleBlock p c) where
@@ -329,6 +381,7 @@ instance ( SimpleBlockCrypto c
 instance ( OuroborosTag p
          , SimpleBlockCrypto c
          , Serialise (Payload p (SimplePreHeader (ExtNodeConfig cfg p) c))
+         , Typeable cfg
          )
       => HasPayload p (SimpleBlock (ExtNodeConfig cfg p) c) where
   blockPayload _ = encPayloadP . headerOuroboros . simpleHeader
@@ -343,10 +396,19 @@ instance OuroborosTag p => UpdateLedger (SimpleBlock p c) where
   data LedgerError (SimpleBlock p c) = LedgerErrorInvalidInputs InvalidInputs
     deriving (Show)
 
+  -- | For the mock implementation, we don't need any state for header
+  -- validation at all, after all, we validate blocks /anyway/. The only thing
+  -- we do need to know is that the hash in the 'Point' matches the block.
+  data HeaderState (SimpleBlock p c) = SimpleHeaderState
+
   -- Apply a block to the ledger state
   applyLedgerState b (SimpleLedgerState u c) = do
       u' <- withExceptT LedgerErrorInvalidInputs $ updateUtxo b u
       return $ SimpleLedgerState u' (c `Set.union` confirmed b)
+
+  getHeaderState _ _ = SimpleHeaderState
+
+  advanceHeader  _ _ _ = return SimpleHeaderState
 
 deriving instance OuroborosTag p => Show (LedgerState (SimpleBlock p c))
 
@@ -363,7 +425,14 @@ instance (BftCrypto c, SimpleBlockCrypto c')
       => ProtocolLedgerView (SimpleBlock (Bft c) c') where
   protocolLedgerView _ _ = ()
 
-instance (PraosCrypto c, SimpleBlockCrypto c')
+-- | Mock ledger is capable of running PBFT, but we simply assume the delegation
+-- map and the protocol parameters can be found statically in the node
+-- configuration.
+instance (PBftCrypto c, SimpleBlockCrypto c')
+  => ProtocolLedgerView (SimpleBlock (ExtNodeConfig (PBftLedgerView c) (PBft c)) c') where
+  protocolLedgerView (EncNodeConfig _ pbftParams) _ls = pbftParams
+
+instance ( PraosCrypto c, SimpleBlockCrypto c')
       => ProtocolLedgerView (SimpleBlock (ExtNodeConfig AddrDist (Praos c)) c') where
   protocolLedgerView (EncNodeConfig _ addrDist) (SimpleLedgerState u _) =
       relativeStakes $ totalStakes addrDist u
@@ -410,6 +479,16 @@ totalStakes addrDist = foldl f Map.empty
 instance Serialise Tx
 instance Serialise SimpleBody
 
-instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => Serialise (SimpleHeader    p c)
 instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => Serialise (SimplePreHeader p c)
 instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => Serialise (SimpleBlock     p c)
+
+instance (SimpleBlockCrypto c, OuroborosTag p, Serialise (Payload p (SimplePreHeader p c))) => Serialise (SimpleHeader    p c) where
+  encode SimpleHeader { headerPreHeader = preHeader, headerOuroboros = payload} =
+    -- Don't serialise the hash now, because we compute it by hashing the
+    -- serialisation of the header.
+    encodeListLen 2 <> encode preHeader <> encode payload
+  decode = do
+    decodeListLenOf 2
+    preHeader <- decode
+    payload   <- decode
+    return $ mkSimpleHeader preHeader payload

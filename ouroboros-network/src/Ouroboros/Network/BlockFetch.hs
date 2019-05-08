@@ -1,7 +1,7 @@
-{-# LANGUAGE NamedFieldPuns             #-}
-{-# LANGUAGE RecordWildCards            #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies        #-}
 
 {-| Let's start with the big picture...
 
@@ -85,22 +85,31 @@ module Ouroboros.Network.BlockFetch (
     -- * The 'FetchClientRegistry'
     FetchClientRegistry,
     newFetchClientRegistry,
+    bracketFetchClient,
+
+    -- * Re-export types used by 'BlockFetchConsensusInterface'
+    FetchMode (..),
+    SizeInBytes,
   ) where
 
-import qualified Data.Map.Strict as Map
 import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import           Data.Void
 
 import           Control.Monad.Class.MonadSTM
 import           Control.Tracer (Tracer)
 
+import           Ouroboros.Network.AnchoredFragment (AnchoredFragment (..))
 import           Ouroboros.Network.Block
-import           Ouroboros.Network.Chain (Point)
-import           Ouroboros.Network.ChainFragment (ChainFragment(..))
+import           Ouroboros.Network.DeltaQ
+                   ( PeerGSV(..), ballisticGSV, degenerateDistribution
+                   , SizeInBytes )
 
-import           Ouroboros.Network.BlockFetch.Types
-import           Ouroboros.Network.BlockFetch.Client
 import           Ouroboros.Network.BlockFetch.State
+import           Ouroboros.Network.BlockFetch.ClientRegistry
+                   ( FetchClientRegistry, newFetchClientRegistry
+                   , readFetchClientsStatus, readFetchClientsStateVars
+                   , bracketFetchClient )
 
 
 -- | The consensus layer functionality that the block fetch logic requires.
@@ -112,17 +121,18 @@ data BlockFetchConsensusInterface peer header block m =
 
        -- | Read the K-suffixes of the candidate chains.
        --
-       -- They must be already validated and contain the last @K@ headers
-       -- (unless we're near the chain genesis of course).
-       --
-       readCandidateChains    :: STM m (Map peer (ChainFragment header)),
+       -- Assumptions:
+       -- * They must be already validated.
+       -- * They may contain /fewer/ than @K@ blocks.
+       -- * Their anchor does not have to intersect with the current chain.
+       readCandidateChains    :: STM m (Map peer (AnchoredFragment header)),
 
        -- | Read the K-suffix of the current chain.
        --
        -- This must contain info on the last @K@ blocks (unless we're near
        -- the chain genesis of course).
        --
-       readCurrentChain       :: STM m (ChainFragment block),
+       readCurrentChain       :: STM m (AnchoredFragment header),
 
        -- | Read the current fetch mode that the block fetch logic should use.
        --
@@ -152,15 +162,15 @@ data BlockFetchConsensusInterface peer header block m =
        -- with operational key certificates there are also cases where
        -- we would consider a chain of equal length to the current chain.
        --
-       plausibleCandidateChain :: ChainFragment block
-                               -> ChainFragment header -> Bool,
+       plausibleCandidateChain :: AnchoredFragment header
+                               -> AnchoredFragment header -> Bool,
 
        -- | Compare two candidate chains and return a preference ordering.
        -- This is used as part of selecting which chains to prioritise for
        -- downloading block bodies.
        --
-       compareCandidateChains  :: ChainFragment header
-                               -> ChainFragment header
+       compareCandidateChains  :: AnchoredFragment header
+                               -> AnchoredFragment header
                                -> Ordering,
 
        -- | Much of the logic for deciding which blocks to download from which
@@ -194,17 +204,21 @@ blockFetchLogic :: forall peer header block m.
                 -> m Void
 blockFetchLogic decisionTracer
                 BlockFetchConsensusInterface{..}
-                (FetchClientRegistry registry) = do
-
-    -- TODO: get this from elsewhere
-    peerGSVs <- newTVarM Map.empty
-
+                registry =
     fetchLogicIterations
       decisionTracer
+      fetchDecisionPolicy
+      fetchTriggerVariables
+      fetchNonTriggerVariables
+  where
+    fetchDecisionPolicy :: FetchDecisionPolicy header
+    fetchDecisionPolicy =
       FetchDecisionPolicy {
-        -- For now, use a fixed policy.
-        -- It's unclear for the moment if this will be fixed external config
+        -- TODO: This is a protocol constant, but determined elsewhere.
+        -- It should be passed in.
         maxInFlightReqsPerPeer   = 10,
+
+        -- TODO: These should be determined by external local node config.
         maxConcurrencyBulkSync   = 2,
         maxConcurrencyDeadline   = 1,
 
@@ -212,31 +226,29 @@ blockFetchLogic decisionTracer
         compareCandidateChains,
         blockFetchSize
       }
+
+    fetchTriggerVariables :: FetchTriggerVariables peer header m
+    fetchTriggerVariables =
       FetchTriggerVariables {
         readStateCurrentChain    = readCurrentChain,
         readStateCandidateChains = readCandidateChains,
-        readStatePeerStatus      = readPeerStatus
+        readStatePeerStatus      = readFetchClientsStatus registry
       }
+
+    fetchNonTriggerVariables :: FetchNonTriggerVariables peer header block m
+    fetchNonTriggerVariables =
       FetchNonTriggerVariables {
         readStateFetchedBlocks = readFetchedBlocks,
-        readStatePeerStates    = readPeerStates,
-        readStatePeerGSVs      = readTVar peerGSVs,
-        readStatePeerReqVars   = readPeerReqVars,
+        readStatePeerStateVars = readFetchClientsStateVars registry,
+        readStatePeerGSVs      = readPeerGSVs,
         readStateFetchMode     = readFetchMode
       }
-  where
-    --TODO: move these next to the FetchClientRegistry
-    readPeerStatus :: STM m (Map peer PeerFetchStatus)
-    readPeerStatus =
-      readTVar registry >>= traverse (readTVar . fetchClientStatusVar)
 
-    readPeerStates :: STM m (Map peer (PeerFetchStatus, PeerFetchInFlight header))
-    readPeerStates =
-      readTVar registry >>=
-      traverse (\s -> (,) <$> readTVar (fetchClientStatusVar s)
-                          <*> readTVar (fetchClientInFlightVar s))
-
-    readPeerReqVars :: STM m (Map peer (TFetchRequestVar m header))
-    readPeerReqVars =
-      readTVar registry >>= return . Map.map fetchClientRequestVar
+    -- TODO: get this from elsewhere once we have DeltaQ info available
+    readPeerGSVs = Map.map (const dummyGSVs) <$> readFetchClientsStateVars registry
+    -- roughly 10ms ping time and 1MBit/s bandwidth
+    -- leads to ~2200 bytes in flight minimum
+    dummyGSVs    = PeerGSV{outboundGSV, inboundGSV}
+    inboundGSV   = ballisticGSV 10e-3 10e-6 (degenerateDistribution 0)
+    outboundGSV  = inboundGSV
 

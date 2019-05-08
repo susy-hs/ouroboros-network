@@ -17,6 +17,7 @@ module Ouroboros.Consensus.Protocol.ExtNodeConfig (
   ) where
 
 import           Codec.Serialise (Serialise)
+import           Data.Typeable (Typeable)
 import           GHC.Generics (Generic)
 
 import           Ouroboros.Consensus.Protocol.Abstract
@@ -25,7 +26,7 @@ import           Ouroboros.Consensus.Util.Condense
 -- | Extension of protocol @p@ by additional static node configuration @cfg@.
 data ExtNodeConfig cfg p
 
-instance OuroborosTag p => OuroborosTag (ExtNodeConfig cfg p) where
+instance (Typeable cfg, OuroborosTag p) => OuroborosTag (ExtNodeConfig cfg p) where
 
   --
   -- Most types remain the same
@@ -56,13 +57,13 @@ instance OuroborosTag p => OuroborosTag (ExtNodeConfig cfg p) where
   -- Propagate changes
   --
 
-  mkPayload (EncNodeConfig cfg _) proof ph =
-      EncPayload <$> mkPayload cfg proof ph
+  mkPayload toEnc (EncNodeConfig cfg _) proof ph =
+      EncPayload <$> mkPayload toEnc cfg proof ph
 
   preferCandidate       (EncNodeConfig cfg _) = preferCandidate       cfg
   compareCandidates     (EncNodeConfig cfg _) = compareCandidates     cfg
   checkIsLeader         (EncNodeConfig cfg _) = checkIsLeader         cfg
-  applyChainState       (EncNodeConfig cfg _) = applyChainState       cfg
+  applyChainState toEnc (EncNodeConfig cfg _) = applyChainState toEnc cfg
   protocolSecurityParam (EncNodeConfig cfg _) = protocolSecurityParam cfg
 
 deriving instance Eq       (Payload p ph) => Eq       (Payload (ExtNodeConfig cfg p) ph)

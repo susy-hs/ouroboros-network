@@ -18,6 +18,7 @@
       "library" = {
         depends = [
           (hsPkgs.base)
+          (hsPkgs.cardano-ledger)
           (hsPkgs.ouroboros-network)
           (hsPkgs.typed-protocols)
           (hsPkgs.io-sim-classes)
@@ -47,6 +48,7 @@
         "demo-playground" = {
           depends = [
             (hsPkgs.base)
+            (hsPkgs.contra-tracer)
             (hsPkgs.ouroboros-network)
             (hsPkgs.ouroboros-consensus)
             (hsPkgs.io-sim-classes)
@@ -78,12 +80,16 @@
             (hsPkgs.ouroboros-consensus)
             (hsPkgs.io-sim-classes)
             (hsPkgs.io-sim)
+            (hsPkgs.bytestring)
             (hsPkgs.containers)
+            (hsPkgs.contra-tracer)
             (hsPkgs.cryptonite)
             (hsPkgs.fgl)
+            (hsPkgs.fingertree)
             (hsPkgs.graphviz)
             (hsPkgs.mtl)
             (hsPkgs.QuickCheck)
+            (hsPkgs.random)
             (hsPkgs.serialise)
             (hsPkgs.tasty)
             (hsPkgs.tasty-hunit)
@@ -110,6 +116,7 @@
           depends = [
             (hsPkgs.base)
             (hsPkgs.ouroboros-network)
+            (hsPkgs.ouroboros-network-testing)
             (hsPkgs.ouroboros-consensus)
             (hsPkgs.io-sim-classes)
             (hsPkgs.io-sim)
@@ -119,6 +126,7 @@
             (hsPkgs.cereal)
             (hsPkgs.containers)
             (hsPkgs.directory)
+            (hsPkgs.fingertree)
             (hsPkgs.generics-sop)
             (hsPkgs.mtl)
             (hsPkgs.pretty-show)
@@ -138,4 +146,4 @@
           };
         };
       };
-    } // rec { src = (pkgs.lib).mkDefault .././../ouroboros-consensus; }
+    } // rec { src = (pkgs.lib).mkDefault ../../././ouroboros-consensus; }

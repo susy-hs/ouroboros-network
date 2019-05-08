@@ -26,20 +26,34 @@
           (hsPkgs.binary)
           (hsPkgs.bytestring)
           (hsPkgs.cborg)
-          (hsPkgs.clock)
           (hsPkgs.containers)
           (hsPkgs.fingertree)
-          (hsPkgs.hashable)
-          (hsPkgs.iohk-monitoring)
           (hsPkgs.mtl)
           (hsPkgs.network)
-          (hsPkgs.pipes)
           (hsPkgs.process)
           (hsPkgs.serialise)
           (hsPkgs.stm)
-          (hsPkgs.text)
           (hsPkgs.time)
+          (hsPkgs.hashable)
+          (hsPkgs.text)
           ];
+        };
+      exes = {
+        "test-cddl" = {
+          depends = [
+            (hsPkgs.base)
+            (hsPkgs.bytestring)
+            (hsPkgs.cborg)
+            (hsPkgs.fingertree)
+            (hsPkgs.hashable)
+            (hsPkgs.process-extras)
+            (hsPkgs.serialise)
+            (hsPkgs.text)
+            (hsPkgs.io-sim-classes)
+            (hsPkgs.ouroboros-network-testing)
+            (hsPkgs.typed-protocols)
+            ];
+          };
         };
       tests = {
         "tests" = {
@@ -56,6 +70,7 @@
             (hsPkgs.bytestring)
             (hsPkgs.cborg)
             (hsPkgs.containers)
+            (hsPkgs.directory)
             (hsPkgs.free)
             (hsPkgs.fingertree)
             (hsPkgs.free)
@@ -66,6 +81,7 @@
             (hsPkgs.process)
             (hsPkgs.QuickCheck)
             (hsPkgs.serialise)
+            (hsPkgs.stm)
             (hsPkgs.tasty)
             (hsPkgs.tasty-quickcheck)
             (hsPkgs.text)
@@ -74,4 +90,4 @@
           };
         };
       };
-    } // rec { src = (pkgs.lib).mkDefault .././../ouroboros-network; }
+    } // rec { src = (pkgs.lib).mkDefault ../../././ouroboros-network; }

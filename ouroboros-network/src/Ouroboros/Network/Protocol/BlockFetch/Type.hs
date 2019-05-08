@@ -12,9 +12,10 @@ module Ouroboros.Network.Protocol.BlockFetch.Type where
 import           Data.Void (Void)
 
 import           Ouroboros.Network.Block (StandardHash, Point)
+import           Network.TypedProtocol.Codec (AnyMessage (..))
 import           Network.TypedProtocol.Core (Protocol (..))
 
--- | Range of headers
+-- | Range of headers, defined by a lower and upper point, inclusive.
 --
 data ChainRange header = ChainRange !(Point header) !(Point header)
   deriving (Show, Eq, Ord)
@@ -89,3 +90,6 @@ instance (StandardHash header, Show body) => Show (Message (BlockFetch header bo
   show MsgNoBlocks             = "MsgNoBlocks"
   show MsgBatchDone            = "MsgBatchDone"
   show MsgClientDone           = "MsgClientDone"
+
+instance (StandardHash header, Show body) => Show (AnyMessage (BlockFetch header body)) where
+  show (AnyMessage msg) = show msg

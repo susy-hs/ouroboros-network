@@ -68,7 +68,7 @@
       };
     } // {
     src = (pkgs.lib).mkDefault (pkgs.fetchgit {
-      url = "https://github.com/input-output-hk/serokell-util";
+      url = "https://github.com/input-output-hk/serokell-util.git";
       rev = "42586f5ea157b4a5411fbcbe41d1bf28bd942438";
       sha256 = "16arrlxjkz9f8rd8v3l0yj70f2ij51didsxcz54jdv3j14pzmb5s";
       });

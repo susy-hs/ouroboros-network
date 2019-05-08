@@ -10,12 +10,14 @@ module Ouroboros.Consensus.Crypto.Hash.Class
     , Hash
     , getHash
     , hash
+    , hashWithSerialiser
     , fromHash
     ) where
 
-import           Codec.Serialise (Serialise (..))
+import           Codec.Serialise.Encoding (Encoding)
 import           Codec.CBOR.Decoding (decodeBytes)
 import           Codec.CBOR.Write (toLazyByteString)
+import           Codec.Serialise (Serialise (..))
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as SB
 import qualified Data.ByteString.Base16 as B16
@@ -24,17 +26,18 @@ import qualified Data.ByteString.Lazy as LB
 import           Data.List (foldl')
 import           Data.Proxy (Proxy (..))
 import           Data.String (IsString (..))
+import           Data.Typeable (Typeable)
 import           GHC.Generics (Generic)
 import           Numeric.Natural
 
 import           Ouroboros.Consensus.Util.Condense
 
-class HashAlgorithm h where
+class Typeable h => HashAlgorithm h where
     byteCount :: proxy h -> Natural
     digest :: proxy h -> ByteString -> ByteString
 
 newtype Hash h a = Hash {getHash :: ByteString}
-    deriving (Eq, Ord, Generic)
+    deriving (Eq, Ord, Generic, Typeable)
 
 instance Condense (Hash h a) where
     condense = show
@@ -58,7 +61,10 @@ instance HashAlgorithm h => Serialise (Hash h a) where
             else fail $ "expected " ++ show le ++ " byte(s), but got " ++ show la
 
 hash :: forall h a. (HashAlgorithm h, Serialise a) => a -> Hash h a
-hash = Hash . digest (Proxy :: Proxy h)  . LB.toStrict . toLazyByteString . encode
+hash = hashWithSerialiser encode
+
+hashWithSerialiser :: forall h a. HashAlgorithm h => (a -> Encoding) -> a -> Hash h a
+hashWithSerialiser toEnc = Hash . digest (Proxy :: Proxy h)  . LB.toStrict . toLazyByteString . toEnc
 
 fromHash :: Hash h a -> Natural
 fromHash = foldl' f 0 . SB.unpack . getHash

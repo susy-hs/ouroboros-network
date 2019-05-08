@@ -1,5 +1,5 @@
 { pkgs ? import <nixpkgs> {}
-, iohk-overlay ? {}
+, iohk-extras ? {}
 , iohk-module ? {}
 , haskell
 , ...
@@ -7,57 +7,7 @@
 let
 
   # our packages
-  stack-pkgs = import ./.stack-pkgs.nix;
-
-  # packages which will require TH and thus
-  # will need -fexternal-interpreter treatment
-  # when cross compiling.
-  # list is derived from
-  # `stack dot --external | grep "template-haskell"`
-  th-packages = [
-          "QuickCheck"
-          "aeson"
-          "bifunctors"
-          "cardano-sl"
-          "cardano-sl-binary"
-          "cardano-sl-chain"
-          "cardano-sl-core"
-          "cardano-sl-util"
-          "cardano-sl-util-test"
-          "cmdargs"
-          "deriving-compat"
-          "ether"
-          "exceptions"
-          "file-embed"
-          "file-embed-lzma"
-          "free"
-          "generics-sop"
-          "half"
-          "hedgehog"
-          "invariant"
-          "iohk-monitoring"
-          "katip"
-          "lens"
-          "microlens-th"
-          "neat-interpolation"
-          "recursion-schemes"
-          "reflection"
-          "safecopy"
-          "semigroupoids"
-          "serokell-util"
-          "swagger2"
-          "tagged"
-          "th-abstraction"
-          "th-expand-syns"
-          "th-lift"
-          "th-lift-instances"
-          "th-orphans"
-          "th-reify-many"
-          "th-utilities"
-          "wai-app-static"
-          "wreq"
-          "yaml"
-        ];
+  stack-pkgs = import ./.stack.nix;
 
   # Build the packageset with module support.
   # We can essentially override anything in the modules
@@ -66,24 +16,30 @@ let
   #  packages.cbors.patches = [ ./one.patch ];
   #  packages.cbors.flags.optimize-gmp = false;
   #
-  compiler = (stack-pkgs.overlay haskell.hackage).compiler.nix-name;
+  compiler = (stack-pkgs.extras haskell.hackage).compiler;
   pkgSet = haskell.mkStackPkgSet {
     inherit stack-pkgs;
-    pkg-def-overlays = [
-      iohk-overlay.${compiler}
+    pkg-def-extras = [
+      iohk-extras.${compiler.nix-name}
     ];
     modules = [
-      (iohk-module { nixpkgs = pkgs;
-                     inherit th-packages; })
-
+      # the iohk-module will supply us with the necessary
+      # cross compilation plumbing to make Template Haskell
+      # work when cross compiling.
+      iohk-module
       {
         # Packages we wish to ignore version bounds of.
         # This is similar to jailbreakCabal, however it
         # does not require any messing with cabal files.
         packages.katip.components.library.doExactConfig = true;
+        packages.typed-protocols.configureFlags = [ "--ghc-option=-Werror" ];
+        packages.io-sim.configureFlags = [ "--ghc-option=-Werror" ];
+        packages.io-sim-classes.configureFlags = [ "--ghc-option=-Werror" ];
+        packages.ouroboros-network.configureFlags = [ "--ghc-option=-Werror" ];
+        packages.ouroboros-consensus.configureFlags = [ "--ghc-option=-Werror" ];
       }
     ];
   };
 
 in
-  pkgSet.config.hsPkgs // { _config = pkgSet.config; }  
+  pkgSet.config.hsPkgs // { _config = pkgSet.config; }

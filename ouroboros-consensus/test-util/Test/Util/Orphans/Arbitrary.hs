@@ -10,7 +10,7 @@ module Test.Util.Orphans.Arbitrary
     , genSmallSlotNo
     ) where
 
-import           Codec.Serialise (Serialise)
+import           Codec.Serialise (Serialise(..))
 import           Data.Time
 import           Data.Word (Word64)
 import           Test.QuickCheck hiding (Fixed (..))
@@ -18,6 +18,7 @@ import           Test.QuickCheck hiding (Fixed (..))
 import           Ouroboros.Network.Block (SlotNo (..))
 
 import           Ouroboros.Consensus.BlockchainTime
+import           Ouroboros.Consensus.ChainSyncClient (ClockSkew (..))
 import           Ouroboros.Consensus.Crypto.DSIGN.Class (DSIGNAlgorithm (..))
 import           Ouroboros.Consensus.Crypto.Hash.Class (Hash,
                      HashAlgorithm (..), hash)
@@ -98,6 +99,10 @@ instance Arbitrary EpochSlot where
   arbitrary = EpochSlot <$> arbitrary <*> arbitrary
   shrink    = genericShrink
 
+instance Arbitrary ClockSkew where
+  arbitrary = ClockSkew <$> choose (0, 5)
+  shrink (ClockSkew n) = [ ClockSkew n' | n' <- shrink n ]
+
 {-------------------------------------------------------------------------------
   Crypto
 -------------------------------------------------------------------------------}
@@ -134,7 +139,7 @@ instance DSIGNAlgorithm v => Arbitrary (SigDSIGN v) where
         a    <- arbitrary :: Gen Int
         sk   <- arbitrary
         seed <- arbitrary
-        return $ withSeed seed $ signDSIGN a sk
+        return $ withSeed seed $ signDSIGN encode a sk
 
     shrink = const []
 
@@ -156,7 +161,7 @@ instance VRFAlgorithm v => Arbitrary (CertVRF v) where
         a    <- arbitrary :: Gen Int
         sk   <- arbitrary
         seed <- arbitrary
-        return $ withSeed seed $ fmap snd $ evalVRF a sk
+        return $ withSeed seed $ fmap snd $ evalVRF encode a sk
 
     shrink = const []
 

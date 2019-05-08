@@ -86,8 +86,8 @@
       };
     } // {
     src = (pkgs.lib).mkDefault (pkgs.fetchgit {
-      url = "https://github.com/serokell/kademlia";
-      rev = "7120bb4d28e708acd52dfd61d3dca7914fac7d7f";
-      sha256 = "1k1wp9dwhzzqfivxc28vhxfqplnyh916crr7bhsiv829d6qifhw1";
+      url = "https://github.com/avieth/kademlia";
+      rev = "38a0575bb303804461f4b6176ca38eba81adbd79";
+      sha256 = "067yqv7dr5s649s3xihgzcq5df7j5kpabnd5mq0zll5ar45v6qdr";
       });
     }

@@ -1,28 +1,24 @@
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE NamedFieldPuns             #-}
 {-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TypeFamilies               #-}
 
 module Ouroboros.Network.BlockFetch.Client (
+    -- * Block fetch protocol client implementation
     blockFetchClient,
     FetchClientPolicy(..),
-
-    FetchClientRegistry(..),
-    newFetchClientRegistry,
-    bracketFetchClient,
+    TraceFetchClientEvent(..),
+    FetchClientStateVars,
   ) where
 
-import           Data.Maybe
-import qualified Data.Set as Set
-import qualified Data.Map as Map
-import           Data.Map (Map)
-
-import           Control.Monad (when, unless)
+import           Control.Monad (unless)
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
 import           Control.Monad.Class.MonadTime
 import           Control.Exception (assert)
+import           Control.Tracer (Tracer, traceWith)
 
 import           Ouroboros.Network.Block
 
@@ -30,17 +26,21 @@ import           Ouroboros.Network.Protocol.BlockFetch.Type
 import           Network.TypedProtocol.Core
 import           Network.TypedProtocol.Pipelined
 
-import           Ouroboros.Network.BlockFetch.Types
-                   ( FetchClientStateVars(..), PeerFetchStatus(..)
-                   , PeerFetchInFlight(..), initialPeerFetchInFlight
-                   , SizeInBytes
+import qualified Ouroboros.Network.ChainFragment as ChainFragment
+import           Ouroboros.Network.ChainFragment (ChainFragment)
+import           Ouroboros.Network.BlockFetch.ClientState
+                   ( FetchClientStateVars, PeerFetchStatus(..)
+                   , PeerFetchInFlight(..)
                    , FetchRequest(..)
-                   , newTFetchRequestVar, takeTFetchRequestVar )
+                   , acknowledgeFetchRequest
+                   , completeBlockDownload
+                   , completeFetchBatch )
 import           Ouroboros.Network.BlockFetch.DeltaQ
-                   ( PeerGSV(..), PeerFetchInFlightLimits(..)
-                   , calculatePeerFetchInFlightLimits )
+                   ( PeerGSV(..), SizeInBytes
+                   , PeerFetchInFlightLimits(..) )
 
 
+-- TODO #468 extract this from BlockFetchConsensusInterface
 data FetchClientPolicy header block m =
      FetchClientPolicy {
        blockFetchSize     :: header -> SizeInBytes,
@@ -58,6 +58,15 @@ data BlockFetchProtocolFailure =
 
 instance Exception BlockFetchProtocolFailure
 
+data TraceFetchClientEvent header =
+       AcknowledgedFetchRequest
+         (FetchRequest header)
+     | CompletedBlockFetch
+         (Point header)
+         (PeerFetchInFlight header)
+          PeerFetchInFlightLimits
+         (PeerFetchStatus header)
+  deriving Show
 
 -- | The implementation of the client side of block fetch protocol designed to
 -- work in conjunction with our fetch logic.
@@ -66,71 +75,34 @@ blockFetchClient :: forall header block m.
                     (MonadSTM m, MonadTime m, MonadThrow m,
                      HasHeader header, HasHeader block,
                      HeaderHash header ~ HeaderHash block)
-                 => FetchClientPolicy header block m
-                 -> FetchClientStateVars header m
-                 -> STM m PeerGSV
+                 => Tracer m (TraceFetchClientEvent header)
+                 -> FetchClientPolicy header block m
+                 -> FetchClientStateVars m header
                  -> PeerPipelined (BlockFetch header block) AsClient BFIdle m ()
-blockFetchClient FetchClientPolicy {
+blockFetchClient tracer
+                 FetchClientPolicy {
                    blockFetchSize,
                    blockMatchesHeader,
                    addFetchedBlock
                  }
-                 FetchClientStateVars {
-                   fetchClientStatusVar,
-                   fetchClientInFlightVar,
-                   fetchClientRequestVar
-                 }
-                 readPeerGSVs =
-    PeerPipelined (senderIdle Zero [])
+                 stateVars =
+    PeerPipelined (senderAwait Zero)
   where
     senderIdle :: forall n.
                   Nat n
-               -> [[header]]
                -> PeerSender (BlockFetch header block) AsClient
                              BFIdle n () m ()
 
     -- We have no requests to send. Check if we have any pending pipelined
     -- results to collect. If so, go round and collect any more. If not, block
     -- and wait for some new requests.
-    senderIdle (Succ outstanding) [] =
+    senderIdle (Succ outstanding) =
       SenderCollect (Just (senderAwait (Succ outstanding)))
-                    (\_ -> senderIdle outstanding [])
+                    (\_ -> senderIdle outstanding)
 
     -- And similarly if there are no pending pipelined results at all.
-    senderIdle Zero [] = senderAwait Zero
+    senderIdle Zero = senderAwait Zero
     --TODO: assert nothing in flight here
-
-    -- We now do have some requests that we have accepted but have yet to
-    -- actually send out. Lets send out the first one.
-    senderIdle outstanding (fragment:fragments) =
-      SenderEffect $ do
-{-
-        now <- getMonotonicTime
-        (outboundGSV, inboundGSV) <- atomically readPeerGSVs
-        --TODO: should we pair this up with the senderAwait earlier?
-        inFlight  <- readTVar fetchClientInFlightVar
-
-        let blockTrailingEdges =
-              blockArrivalShedule
-                outboundGSV inboundGSV
-                inFlight
-                (map snd fragment)
-
-        timeout <- newTimeout (head blockTrailingEdges)
-        fork $ do
-          fired <- awaitTimeout timeout
-          when fired $
-            atomically (writeTVar _ PeerFetchStatusAberrant)
--}
-        let range = assert (not (null fragment)) $
-                    ChainRange (blockPoint (head fragment))
-                               (blockPoint (last fragment))
-        return $
-          SenderPipeline
-            (ClientAgency TokIdle)
-            (MsgRequestRange range)
-            (receiverBusy fragment)
-            (senderIdle (Succ outstanding) fragments)
 
     senderAwait :: forall n.
                    Nat n
@@ -148,47 +120,65 @@ blockFetchClient FetchClientPolicy {
       -- in-flight, and the tracking state that the fetch logic uses now
       -- reflects that.
       --
-      fragments <- atomically $ do
-        FetchRequest fragments <- takeTFetchRequestVar fetchClientRequestVar
-        PeerFetchInFlight{..}  <- readTVar fetchClientInFlightVar
-        writeTVar fetchClientInFlightVar $!
-          PeerFetchInFlight {
-            peerFetchReqsInFlight   = peerFetchReqsInFlight
-                                    + fromIntegral (length fragments),
+      (request, gsvs, inflightlimits) <- acknowledgeFetchRequest stateVars
 
-            peerFetchBytesInFlight  = peerFetchBytesInFlight
-                                    + sum [ blockFetchSize header
-                                          | fragment <- fragments
-                                          , header   <- fragment ],
+      traceWith tracer (AcknowledgedFetchRequest request)
 
-            peerFetchBlocksInFlight = peerFetchBlocksInFlight
-                          `Set.union` Set.fromList [ blockPoint header
-                                                   | fragment <- fragments
-                                                   , header   <- fragment ]
-          }
+      return $ senderActive outstanding gsvs inflightlimits
+                            (fetchRequestFragments request)
 
-        PeerFetchInFlightLimits {
-          inFlightBytesHighWatermark
-        } <- calculatePeerFetchInFlightLimits <$> readPeerGSVs
+    senderActive :: forall n.
+                    Nat n
+                 -> PeerGSV
+                 -> PeerFetchInFlightLimits
+                 -> [ChainFragment header]
+                 -> PeerSender (BlockFetch header block) AsClient
+                               BFIdle n () m ()
 
-        -- Set our status to busy if we've got over the high watermark.
-        -- Only update the variable if it changed, to avoid spurious wakeups.
-        currentStatus <- readTVar fetchClientStatusVar
-        when (peerFetchBytesInFlight >= inFlightBytesHighWatermark &&
-              currentStatus == PeerFetchStatusReady) $
-          writeTVar fetchClientStatusVar PeerFetchStatusBusy
+    -- We now do have some requests that we have accepted but have yet to
+    -- actually send out. Lets send out the first one.
+    senderActive outstanding gsvs inflightlimits (fragment:fragments) =
+      SenderEffect $ do
+{-
+        now <- getMonotonicTime
+        --TODO: should we pair this up with the senderAwait earlier?
+        inFlight  <- readTVar fetchClientInFlightVar
 
-        --TODO: think about status aberrant
+        let blockTrailingEdges =
+              blockArrivalShedule
+                gsvs
+                inFlight
+                (map snd fragment)
 
-        return fragments
+        timeout <- newTimeout (head blockTrailingEdges)
+        fork $ do
+          fired <- awaitTimeout timeout
+          when fired $
+            atomically (writeTVar _ PeerFetchStatusAberrant)
+-}
+        let range = assert (not (ChainFragment.null fragment)) $
+                    ChainRange (blockPoint lower)
+                               (blockPoint upper)
+              where
+                Just lower = ChainFragment.last fragment
+                Just upper = ChainFragment.head fragment
 
-      return (senderIdle outstanding fragments)
+        return $
+          SenderPipeline
+            (ClientAgency TokIdle)
+            (MsgRequestRange range)
+            (receiverBusy (ChainFragment.toOldestFirst fragment) inflightlimits)
+            (senderActive (Succ outstanding) gsvs inflightlimits fragments)
+
+    -- And when we run out, go back to idle.
+    senderActive outstanding _ _ [] = senderIdle outstanding
 
 
     receiverBusy :: [header]
+                 -> PeerFetchInFlightLimits
                  -> PeerReceiver (BlockFetch header block) AsClient
                                  BFBusy BFIdle m ()
-    receiverBusy headers =
+    receiverBusy headers inflightlimits =
       ReceiverAwait
         (ServerAgency TokBusy) $ \msg ->
         case msg of
@@ -205,27 +195,18 @@ blockFetchClient FetchClientPolicy {
           MsgNoBlocks   -> ReceiverDone ()
           --TODO: also adjust the in-flight stats
 
-          MsgStartBatch -> ReceiverEffect $ do
-            inFlightLimits <- calculatePeerFetchInFlightLimits <$>
-                                atomically readPeerGSVs
-            return $ receiverStreaming inFlightLimits headers
+          MsgStartBatch -> receiverStreaming inflightlimits headers
 
     receiverStreaming :: PeerFetchInFlightLimits
                       -> [header]
                       -> PeerReceiver (BlockFetch header block) AsClient
                                       BFStreaming BFIdle m ()
-    receiverStreaming inFlightLimits@PeerFetchInFlightLimits {
-                        inFlightBytesLowWatermark
-                      }
-                      headers =
+    receiverStreaming inflightlimits headers =
       ReceiverAwait
         (ServerAgency TokStreaming) $ \msg ->
         case (msg, headers) of
           (MsgBatchDone, []) -> ReceiverEffect $ do
-            atomically $ modifyTVar' fetchClientInFlightVar $ \inflight ->
-              inflight {
-                peerFetchReqsInFlight = peerFetchReqsInFlight inflight - 1
-              }
+            completeFetchBatch stateVars
             return (ReceiverDone ())
 
 
@@ -241,39 +222,6 @@ blockFetchClient FetchClientPolicy {
             updateTimeout timeout (diffTime now )
 -}
 
-            -- Update our in-flight stats and our current status
-            atomically $ do
-              inflight <- readTVar fetchClientInFlightVar
-              writeTVar fetchClientInFlightVar $!
-                inflight {
-                  peerFetchBytesInFlight  = peerFetchBytesInFlight inflight
-                                          - blockFetchSize header,
-
-                  peerFetchBlocksInFlight = blockPoint header
-                               `Set.delete` peerFetchBlocksInFlight inflight
-                  --TODO: can assert here that we don't go negative, and the
-                  -- block we're deleting was in fact there.
-                }
-
-              -- Now crucially, we don't want to end up below the in-flight low
-              -- watermark because that's when the remote peer would go idle.
-              -- But we only get notified of blocks on their /trailing/ edge,
-              -- not their leading edge. Our next best thing is the trailing
-              -- edge of the block before. So, we check if after the /next/
-              -- block we would be below the low watermark, and update our
-              -- status to ready if appropriate.
-              --
-              let nextBytesInFlight =
-                      peerFetchBytesInFlight inflight
-                    - blockFetchSize header
-                    - maybe 0 blockFetchSize (listToMaybe headers')
-              currentStatus <- readTVar fetchClientStatusVar
-              when (nextBytesInFlight <= inFlightBytesLowWatermark &&
-                    currentStatus == PeerFetchStatusBusy) $
-                writeTVar fetchClientStatusVar PeerFetchStatusReady
-
-            --TODO: should we validate the expected block size? peers can lie
-
             unless (blockPoint header == castPoint (blockPoint block)) $
               throwM BlockFetchProtocolFailureWrongBlock
 
@@ -287,59 +235,31 @@ blockFetchClient FetchClientPolicy {
             -- in-flight but is still not in the fetched block store.
             -- either 1. make it atomic, or 2. do this first, or 3. some safe
             -- interleaving
+
+            -- Add the block to the chain DB, notifying of any new chains.
             addFetchedBlock (castPoint (blockPoint header)) block
 
-            -- update the volatile block heap, notifying of any new tips
-            -- TODO: when do we reset the status from PeerFetchStatusAberrant
-            -- to PeerFetchStatusReady/Busy?
+            -- Note that we add the block to the chain DB /before/ updating our
+            -- current status and in-flight stats. Otherwise blocks will
+            -- disappear from our in-flight set without yet appearing in the
+            -- fetched block set. The fetch logic would conclude it has to
+            -- download the missing block(s) again.
 
-            return (receiverStreaming inFlightLimits headers')
+            -- Update our in-flight stats and our current status
+            (inflight, currentStatus) <-
+              completeBlockDownload blockFetchSize inflightlimits
+                                    header stateVars
+
+            traceWith tracer $ CompletedBlockFetch
+                                 (blockPoint header)
+                                 inflight inflightlimits
+                                 currentStatus
+
+            return (receiverStreaming inflightlimits headers')
 
           (MsgBatchDone, (_:_)) -> ReceiverEffect $
             throwM BlockFetchProtocolFailureTooFewBlocks
 
           (MsgBlock _, []) -> ReceiverEffect $
             throwM BlockFetchProtocolFailureTooManyBlocks
-
-
-
--- | A registry for the threads that are executing the client side of the
--- 'BlockFetch' protocol to communicate with our peers.
---
--- The registry contains the shared variables we use to communicate with these
--- threads, both to track their status and to provide instructions.
---
--- The threads add\/remove themselves to\/from this registry when they start up
--- and shut down.
---
-newtype FetchClientRegistry peer header m =
-        FetchClientRegistry (TVar m (Map peer (FetchClientStateVars header m)))
-
-newFetchClientRegistry :: MonadSTM m => m (FetchClientRegistry peer header m)
-newFetchClientRegistry = FetchClientRegistry <$> newTVarM Map.empty
-
-bracketFetchClient :: (MonadThrow m, MonadSTM m, Ord peer)
-                   => FetchClientRegistry peer header m
-                   -> peer
-                   -> (FetchClientStateVars header m -> m a)
-                   -> m a
-bracketFetchClient (FetchClientRegistry registry) peer =
-    bracket register unregister
-  where
-    register = atomically $ do
-      fetchClientInFlightVar <- newTVar initialPeerFetchInFlight
-      fetchClientStatusVar   <- newTVar PeerFetchStatusReady
-      fetchClientRequestVar  <- newTFetchRequestVar
-      let stateVars = FetchClientStateVars {
-                        fetchClientStatusVar,
-                        fetchClientInFlightVar,
-                        fetchClientRequestVar
-                      }
-      modifyTVar' registry (Map.insert peer stateVars)
-      return stateVars
-
-    unregister FetchClientStateVars{fetchClientStatusVar} =
-      atomically $ do
-        writeTVar fetchClientStatusVar PeerFetchStatusShutdown
-        modifyTVar' registry (Map.delete peer)
 

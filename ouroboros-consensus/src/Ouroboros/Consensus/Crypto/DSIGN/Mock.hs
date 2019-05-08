@@ -9,9 +9,11 @@ module Ouroboros.Consensus.Crypto.DSIGN.Mock
     , SignKeyDSIGN(..)
     , VerKeyDSIGN(..)
     , verKeyIdFromSigned
+    , mockSign
     ) where
 
-import           Codec.Serialise (Serialise)
+import           Codec.Serialise (Serialise(..))
+import           Codec.CBOR.Encoding (Encoding)
 import           GHC.Generics (Generic)
 
 import           Ouroboros.Consensus.Crypto.DSIGN.Class
@@ -32,16 +34,24 @@ instance DSIGNAlgorithm MockDSIGN where
     data SigDSIGN MockDSIGN = SigMockDSIGN ByteString Int
         deriving (Show, Eq, Ord, Generic)
 
+    encodeVerKeyDSIGN = encode
+    encodeSignKeyDSIGN = encode
+    encodeSigDSIGN = encode
+
+    decodeVerKeyDSIGN = decode
+    decodeSignKeyDSIGN = decode
+    decodeSigDSIGN = decode
+
     genKeyDSIGN = SignKeyMockDSIGN <$> nonNegIntR
 
     deriveVerKeyDSIGN (SignKeyMockDSIGN n) = VerKeyMockDSIGN n
 
-    signDSIGN a sk = return $ mkSig a sk
+    signDSIGN toEnc a sk = return $ mockSign toEnc a sk
 
-    verifyDSIGN (VerKeyMockDSIGN n) a s = s == mkSig a (SignKeyMockDSIGN n)
+    verifyDSIGN toEnc (VerKeyMockDSIGN n) a s = s == mockSign toEnc a (SignKeyMockDSIGN n)
 
-mkSig :: Serialise a => a -> SignKeyDSIGN MockDSIGN -> SigDSIGN MockDSIGN
-mkSig a (SignKeyMockDSIGN n) = SigMockDSIGN (getHash $ hash @ShortHash a) n
+mockSign :: (a -> Encoding) -> a -> SignKeyDSIGN MockDSIGN -> SigDSIGN MockDSIGN
+mockSign toEnc a (SignKeyMockDSIGN n) = SigMockDSIGN (getHash $ hashWithSerialiser @ShortHash toEnc a) n
 
 instance Condense (SigDSIGN MockDSIGN) where
     condense (SigMockDSIGN _ i) = show i

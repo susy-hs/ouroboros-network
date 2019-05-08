@@ -12,9 +12,11 @@ module Ouroboros.Consensus.Demo (
     -- * Abstract over protocols
     DemoProtocol(..)
   , DemoBFT
+  , DemoPBFT
   , DemoPraos
   , DemoLeaderSchedule
   , Block
+  , Header
   , NumCoreNodes(..)
   , ProtocolInfo(..)
   , protocolInfo
@@ -33,9 +35,10 @@ import           Data.Either (fromRight)
 import           Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 
-import           Ouroboros.Network.Chain (Chain (..))
+import           Ouroboros.Network.Block (SlotNo (..))
 
 import           Ouroboros.Consensus.Crypto.DSIGN
 import           Ouroboros.Consensus.Crypto.DSIGN.Mock (verKeyIdFromSigned)
@@ -49,6 +52,7 @@ import           Ouroboros.Consensus.Protocol.Abstract
 import           Ouroboros.Consensus.Protocol.BFT
 import           Ouroboros.Consensus.Protocol.ExtNodeConfig
 import           Ouroboros.Consensus.Protocol.LeaderSchedule
+import           Ouroboros.Consensus.Protocol.PBFT
 import           Ouroboros.Consensus.Protocol.Praos
 import           Ouroboros.Consensus.Util
 import           Ouroboros.Consensus.Util.Condense
@@ -58,22 +62,27 @@ import           Ouroboros.Consensus.Util.Condense
 -------------------------------------------------------------------------------}
 
 type DemoBFT            = Bft BftMockCrypto
+type DemoPBFT           = ExtNodeConfig (PBftLedgerView PBftMockCrypto) (PBft PBftMockCrypto)
 type DemoPraos          = ExtNodeConfig AddrDist (Praos PraosMockCrypto)
 type DemoLeaderSchedule = WithLeaderSchedule (Praos PraosMockCrypto)
 
 -- | Consensus protocol to use
 data DemoProtocol p where
   DemoBFT            :: SecurityParam -> DemoProtocol DemoBFT
+  DemoPBFT           :: PBftParams -> DemoProtocol DemoPBFT
   DemoPraos          :: PraosParams -> DemoProtocol DemoPraos
   DemoLeaderSchedule :: LeaderSchedule -> PraosParams -> DemoProtocol DemoLeaderSchedule
 
 -- | Our 'Block' type stays the same.
 type Block p = SimpleBlock p SimpleBlockMockCrypto
 
--- | Data required to run the specified protocol
+-- | Our 'Header' type stays the same.
+type Header p = SimpleHeader p SimpleBlockMockCrypto
+
+-- | Data required to run the specified protocol.
 data ProtocolInfo p = ProtocolInfo {
         pInfoConfig     :: NodeConfig p
-      , pInfoInitChain  :: Chain (Block p)
+        -- | The ledger state at genesis
       , pInfoInitLedger :: ExtLedgerState (Block p)
       , pInfoInitState  :: NodeState p
       }
@@ -90,6 +99,7 @@ type DemoProtocolConstraints p = (
 
 demoProtocolConstraints :: DemoProtocol p -> Dict (DemoProtocolConstraints p)
 demoProtocolConstraints DemoBFT{}            = Dict
+demoProtocolConstraints DemoPBFT{}           = Dict
 demoProtocolConstraints DemoPraos{}          = Dict
 demoProtocolConstraints DemoLeaderSchedule{} = Dict
 
@@ -112,8 +122,27 @@ protocolInfo (DemoBFT securityParam) (NumCoreNodes numCoreNodes) (CoreNodeId nid
               | n <- [0 .. numCoreNodes - 1]
               ]
           }
-      , pInfoInitChain  = Genesis
       , pInfoInitLedger = ExtLedgerState (genesisLedgerState addrDist) ()
+      , pInfoInitState  = ()
+      }
+  where
+    addrDist :: AddrDist
+    addrDist = mkAddrDist numCoreNodes
+protocolInfo (DemoPBFT params) (NumCoreNodes numCoreNodes) (CoreNodeId nid) =
+    ProtocolInfo {
+        pInfoConfig = EncNodeConfig {
+            encNodeConfigP = PBftNodeConfig {
+                pbftParams   = params {
+                    pbftNumNodes      = fromIntegral numCoreNodes
+                    }
+              , pbftNodeId   = CoreId nid
+              , pbftSignKey  = SignKeyMockDSIGN nid
+              , pbftVerKey   = VerKeyMockDSIGN nid
+              }
+            , encNodeConfigExt = PBftLedgerView
+                (Map.fromList [(VerKeyMockDSIGN n, VerKeyMockDSIGN n) | n <- [0 .. numCoreNodes - 1]])
+          }
+      , pInfoInitLedger = ExtLedgerState (genesisLedgerState addrDist) ( Seq.empty, SlotNo 0 )
       , pInfoInitState  = ()
       }
   where
@@ -132,7 +161,6 @@ protocolInfo (DemoPraos params) (NumCoreNodes numCoreNodes) (CoreNodeId nid) =
               }
           , encNodeConfigExt = addrDist
           }
-      , pInfoInitChain  = Genesis
       , pInfoInitLedger = ExtLedgerState {
             ledgerState         = genesisLedgerState addrDist
           , ouroborosChainState = []
@@ -167,7 +195,6 @@ protocolInfo (DemoLeaderSchedule schedule params)
             }
         , lsNodeConfigNodeId   = CoreNodeId nid
         }
-    , pInfoInitChain  = Genesis
     , pInfoInitLedger = ExtLedgerState
         { ledgerState         = genesisLedgerState addrDist
         , ouroborosChainState = ()
@@ -252,6 +279,14 @@ instance HasCreator (Block DemoBFT) where
     getCreator = CoreNodeId
                . verKeyIdFromSigned
                . bftSignature
+               . headerOuroboros
+               . simpleHeader
+
+instance HasCreator (Block DemoPBFT) where
+    getCreator = CoreNodeId
+               . verKeyIdFromSigned
+               . pbftSignature
+               . encPayloadP
                . headerOuroboros
                . simpleHeader
 

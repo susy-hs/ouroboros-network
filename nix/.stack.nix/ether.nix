@@ -3,7 +3,7 @@
     flags = { disable-tup-instances = false; };
     package = {
       specVersion = "1.18";
-      identifier = { name = "ether"; version = "0.5.1.0"; };
+      identifier = { name = "ether"; version = "9999"; };
       license = "BSD-3-Clause";
       copyright = "";
       maintainer = "Vladislav Zavialov <vlad.z.4096@gmail.com>";
@@ -62,8 +62,8 @@
       };
     } // {
     src = (pkgs.lib).mkDefault (pkgs.fetchgit {
-      url = "https://github.com/int-index/ether";
-      rev = "84c1d560da241c8111d1a3c98d9a896f0c62087b";
-      sha256 = "0h2md24q9dhxh5r79dy7shry7yxgwf45735fqwlx3j2z0znq9vxs";
+      url = "https://github.com/input-output-hk/ether.git";
+      rev = "a311878ae17ed5f201421bdcd5392a24b746ff0b";
+      sha256 = "0xvbsap7brpyvac6v5k59vv7lfpdr9ridyz7nd8p27rwdlsn3ip9";
       });
     }

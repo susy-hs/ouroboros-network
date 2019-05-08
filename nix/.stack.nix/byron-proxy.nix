@@ -44,10 +44,12 @@
           (hsPkgs.random)
           (hsPkgs.resourcet)
           (hsPkgs.sqlite-simple)
+          (hsPkgs.serialise)
           (hsPkgs.stm)
           (hsPkgs.tagged)
           (hsPkgs.text)
           (hsPkgs.transformers)
+          (hsPkgs.typed-protocols)
           ];
         };
       exes = {
@@ -68,17 +70,25 @@
             (hsPkgs.containers)
             (hsPkgs.contra-tracer)
             (hsPkgs.directory)
+            (hsPkgs.exceptions)
             (hsPkgs.iohk-monitoring)
             (hsPkgs.io-sim-classes)
             (hsPkgs.lens)
+            (hsPkgs.network)
             (hsPkgs.optparse-applicative)
             (hsPkgs.ouroboros-consensus)
+            (hsPkgs.ouroboros-network)
             (hsPkgs.random)
+            (hsPkgs.resourcet)
+            (hsPkgs.serialise)
             (hsPkgs.stm)
             (hsPkgs.text)
             (hsPkgs.time)
+            (hsPkgs.type-operators)
+            (hsPkgs.transformers)
+            (hsPkgs.typed-protocols)
             ];
           };
         };
       };
-    } // rec { src = (pkgs.lib).mkDefault .././../byron-proxy; }
+    } // rec { src = (pkgs.lib).mkDefault ../../././byron-proxy; }

@@ -25,6 +25,10 @@ library
 
   exposed-modules:
                        Ouroboros.Consensus.BlockchainTime
+                       Ouroboros.Consensus.BlockFetchClient
+                       Ouroboros.Consensus.BlockFetchServer
+                       Ouroboros.Consensus.ChainSyncClient
+                       Ouroboros.Consensus.ChainSyncServer
                        Ouroboros.Consensus.Crypto.DSIGN
                        Ouroboros.Consensus.Crypto.DSIGN.Class
                        Ouroboros.Consensus.Crypto.DSIGN.Ed448
@@ -51,10 +55,12 @@ library
                        Ouroboros.Consensus.Protocol.BFT
                        Ouroboros.Consensus.Protocol.LeaderSchedule
                        Ouroboros.Consensus.Protocol.Praos
+                       Ouroboros.Consensus.Protocol.PBFT
                        Ouroboros.Consensus.Protocol.Test
                        Ouroboros.Consensus.Protocol.ExtNodeConfig
                        Ouroboros.Consensus.Protocol.ModChainSel
                        Ouroboros.Consensus.Util
+                       Ouroboros.Consensus.Util.AnchoredFragment
                        Ouroboros.Consensus.Util.CBOR
                        Ouroboros.Consensus.Util.Chain
                        Ouroboros.Consensus.Util.Classify
@@ -65,9 +71,14 @@ library
                        Ouroboros.Consensus.Util.Serialise
                        Ouroboros.Consensus.Util.Singletons
                        Ouroboros.Consensus.Util.STM
+                       Ouroboros.Consensus.Util.ThreadRegistry
 
                        -- Storing things on disk
                        Ouroboros.Storage.Common
+                       Ouroboros.Storage.ChainDB
+                       Ouroboros.Storage.ChainDB.API
+                       Ouroboros.Storage.ChainDB.Mock
+                       Ouroboros.Storage.ChainDB.Model
                        Ouroboros.Storage.FS.API
                        Ouroboros.Storage.FS.API.Example
                        Ouroboros.Storage.FS.API.Types
@@ -136,6 +147,7 @@ library
                        ViewPatterns
 
   build-depends:       base              >=4.9 && <4.13,
+                       cardano-ledger,
                        ouroboros-network,
                        typed-protocols,
                        io-sim-classes,
@@ -181,6 +193,7 @@ executable demo-playground
                        Run
                        Topology
   build-depends:       base,
+                       contra-tracer,
                        ouroboros-network,
                        ouroboros-consensus,
                        io-sim-classes,
@@ -211,15 +224,18 @@ test-suite test-consensus
   main-is:          Main.hs
   other-modules:
                     Test.Consensus.BlockchainTime
+                    Test.Consensus.ChainSyncClient
                     Test.Dynamic.BFT
                     Test.Dynamic.General
                     Test.Dynamic.LeaderSchedule
                     Test.Dynamic.Network
+                    Test.Dynamic.PBFT
                     Test.Dynamic.Praos
                     Test.Dynamic.Util
                     Test.Ouroboros
                     Test.Util.Orphans.Arbitrary
                     Test.Util.DepFn
+                    Test.Util.TestBlock
   build-depends:    base,
                     typed-protocols,
                     ouroboros-network,
@@ -227,12 +243,16 @@ test-suite test-consensus
                     io-sim-classes,
                     io-sim,
 
+                    bytestring,
                     containers,
+                    contra-tracer,
                     cryptonite,
                     fgl,
+                    fingertree,
                     graphviz,
                     mtl,
                     QuickCheck,
+                    random,
                     serialise,
                     tasty,
                     tasty-hunit,
@@ -277,6 +297,10 @@ test-suite test-storage
   main-is:          Main.hs
   other-modules:
                     Test.Ouroboros.Storage
+                    Test.Ouroboros.Storage.ChainDB
+                    Test.Ouroboros.Storage.ChainDB.Mock
+                    Test.Ouroboros.Storage.ChainDB.Model
+                    Test.Ouroboros.Storage.ChainDB.TestBlock
                     Test.Ouroboros.Storage.FS
                     Test.Ouroboros.Storage.FS.Sim.Error
                     Test.Ouroboros.Storage.FS.StateMachine
@@ -290,13 +314,16 @@ test-suite test-storage
                     Test.Ouroboros.Storage.LedgerDB.OnDisk
                     Test.Ouroboros.Storage.Util
                     Test.Ouroboros.Storage.VolatileDB
+                    Test.Ouroboros.Storage.VolatileDB.Mock
                     Test.Ouroboros.Storage.VolatileDB.Model
                     Test.Ouroboros.Storage.VolatileDB.StateMachine
                     Test.Ouroboros.Storage.VolatileDB.TestBlock
                     Test.Util.Orphans.Arbitrary
                     Test.Util.RefEnv
+                    Test.Util.TestBlock
   build-depends:    base,
                     ouroboros-network,
+                    ouroboros-network-testing,
                     ouroboros-consensus,
                     io-sim-classes,
                     io-sim,
@@ -307,6 +334,7 @@ test-suite test-storage
                     cereal,
                     containers,
                     directory,
+                    fingertree,
                     generics-sop,
                     mtl,
                     pretty-show,
