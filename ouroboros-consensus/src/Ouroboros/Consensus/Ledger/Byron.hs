@@ -10,7 +10,7 @@
 
 module Ouroboros.Consensus.Ledger.Byron where
 
-import           Cardano.Binary (Annotated(..), reAnnotate)
+import           Cardano.Binary (Annotated(..))
 import qualified Cardano.Chain.Block as CC.Block
 import qualified Cardano.Chain.Common as CC.Common
 import qualified Cardano.Chain.Delegation.Validation.Activation as CC.Delegation
@@ -60,8 +60,6 @@ instance HasHeader ByronBlock where
 instance UpdateLedger ByronBlock where
   newtype LedgerState ByronBlock = ByronLedgerState CC.Block.ChainValidationState
     deriving (Eq, Show)
-  newtype HeaderState ByronBlock = ByronHeaderState CC.Block.HeaderState
-    deriving (Eq, Show)
   newtype LedgerError ByronBlock = ByronLedgerError CC.Block.ChainValidationError
     deriving (Eq, Show)
   newtype LedgerConfig ByronBlock = ByronLedgerConfig Genesis.Config
@@ -70,22 +68,23 @@ instance UpdateLedger ByronBlock where
     = mapExcept (bimap ByronLedgerError ByronLedgerState) $ do
       CC.Block.BodyState { CC.Block.utxo, CC.Block.updateState, CC.Block.delegationState } <- CC.Block.updateBody bodyEnv bodyState block
       pure $ state
-        { CC.Block.cvsHeaderState  = (CC.Block.cvsHeaderState state)
-          { CC.Block.hsUPIState = updateState }
+        { CC.Block.cvsLastSlot     = CC.Block.blockSlot block
+        , CC.Block.cvsPreviousHash = Right $ CC.Block.blockHashAnnotated block
         , CC.Block.cvsUtxo         = utxo
+        , CC.Block.cvsUpdateState  = updateState
         , CC.Block.cvsDelegationState = delegationState
         }
     where
       bodyState = CC.Block.BodyState
         { CC.Block.utxo        = CC.Block.cvsUtxo state
-        , CC.Block.updateState = CC.Block.hsUPIState . CC.Block.cvsHeaderState $ state
+        , CC.Block.updateState = CC.Block.cvsUpdateState state
         , CC.Block.delegationState = CC.Block.cvsDelegationState state
         }
       bodyEnv = CC.Block.BodyEnvironment
-        { CC.Block.protocolMagic = fixPM $ Genesis.configProtocolMagic cfg
+        { CC.Block.protocolMagic = Genesis.configProtocolMagic cfg
         , CC.Block.k = Genesis.configK cfg
         , CC.Block.numGenKeys
-        , CC.Block.protocolParameters = CC.UPI.adoptedProtocolParameters . CC.Block.hsUPIState . CC.Block.cvsHeaderState $ state
+        , CC.Block.protocolParameters = CC.UPI.adoptedProtocolParameters . CC.Block.cvsUpdateState $ state
         , CC.Block.currentEpoch = CC.Slot.slotNumberEpoch (Genesis.configEpochSlots cfg) (CC.Block.blockSlot block)
         }
       numGenKeys :: Word8
@@ -95,15 +94,18 @@ instance UpdateLedger ByronBlock where
             | n > fromIntegral (maxBound :: Word8) -> panic
               "updateBody: Too many genesis keys"
             | otherwise -> fromIntegral n
-      fixPM (Crypto.AProtocolMagic a b) = Crypto.AProtocolMagic (reAnnotate a) b
 
   applyLedgerHeader (ByronLedgerConfig cfg) (ByronBlock block) (ByronLedgerState state)
     = mapExcept (bimap ByronLedgerError ByronLedgerState) $ do
-      headerState <- CC.Block.updateHeader headerEnv (CC.Block.cvsHeaderState state) (CC.Block.blockHeader block)
-      pure $ state { CC.Block.cvsHeaderState  = headerState }
+      updateState <- CC.Block.updateHeader headerEnv (CC.Block.cvsUpdateState state) (CC.Block.blockHeader block)
+      pure $ state
+        { CC.Block.cvsLastSlot     = CC.Block.blockSlot block
+        , CC.Block.cvsPreviousHash = Right $ CC.Block.blockHashAnnotated block
+        , CC.Block.cvsUpdateState  = updateState
+        }
     where
       headerEnv = CC.Block.HeaderEnvironment
-        { CC.Block.protocolMagic = fixPMI $ Genesis.configProtocolMagicId cfg
+        { CC.Block.protocolMagic = Genesis.configProtocolMagicId cfg
         , CC.Block.k          = Genesis.configK cfg
         , CC.Block.numGenKeys
         , CC.Block.delegationMap
@@ -120,8 +122,6 @@ instance UpdateLedger ByronBlock where
       delegationMap =
         CC.Delegation.asDelegationMap . CC.Delegation.isActivationState
         $ CC.Block.cvsDelegationState state
-
-      fixPMI pmi = reAnnotate $ Annotated pmi ()
 
 {-------------------------------------------------------------------------------
   Support for PBFT consensus algorithm
