@@ -33,7 +33,6 @@ import           Test.Tasty.QuickCheck (testProperty)
 import           Text.Printf
 
 import           Control.Monad.Class.MonadAsync
-import           Control.Monad.Class.MonadFork
 import           Control.Monad.Class.MonadSay
 import           Control.Monad.Class.MonadST
 import           Control.Monad.Class.MonadSTM
@@ -107,10 +106,8 @@ instance Mx.ProtocolEnum TestProtocols2 where
   toProtocolEnum _ = Nothing
 
 instance Mx.MiniProtocolLimits TestProtocols2 where
-  maximumMessageSize ChainSync2   = defaultMiniProtocolLimit
-  maximumMessageSize BlockFetch2  = defaultMiniProtocolLimit
-  maximumIngressQueue ChainSync2  = defaultMiniProtocolLimit
-  maximumIngressQueue BlockFetch2 = defaultMiniProtocolLimit
+  maximumMessageSize _  = defaultMiniProtocolLimit
+  maximumIngressQueue _ = defaultMiniProtocolLimit
 
 data TestProtocolsSmall = ChainSyncSmall
   deriving (Eq, Ord, Enum, Bounded, Show)
@@ -242,9 +239,10 @@ instance Arbitrary Mx.MuxBearerState where
                           , Mx.Dead
                           ]
 
-startMuxSTM :: ( MonadAsync m, MonadCatch m, MonadFork m, MonadMask m, MonadSay m, MonadSTM m
-               , MonadThrow m , MonadTime m , MonadTimer m, Ord ptcl, Enum ptcl, Bounded ptcl
-               , Mx.ProtocolEnum ptcl , Show ptcl, Mx.MiniProtocolLimits ptcl)
+startMuxSTM :: ( MonadAsync m, MonadCatch m, MonadMask m, MonadSay m, MonadSTM m
+               , MonadThrow m , MonadThrow (STM m), MonadTime m , MonadTimer m, Ord ptcl
+               , Enum ptcl, Bounded ptcl , Mx.ProtocolEnum ptcl , Show ptcl
+               , Mx.MiniProtocolLimits ptcl)
             => Mx.MiniProtocolDescriptions ptcl m
             -> TBQueue m BL.ByteString
             -> TBQueue m BL.ByteString
@@ -433,7 +431,7 @@ prop_mux_2_minis request0 response0 response1 request1 = ioProperty $ do
     serverAsync <- startMuxSTM server_mps server_w server_r sduLen Nothing
 
 
-    !r <- waitBoth clientAsync serverAsync
+    r <- waitBoth clientAsync serverAsync
     case r of
          (Just _, _) -> return $ property False
          (_, Just _) -> return $ property False
@@ -532,11 +530,11 @@ encodeInvalidMuxSDU sdu =
 prop_demux_sdu :: forall m.
                     ( MonadAsync m
                     , MonadCatch m
-                    , MonadFork m
                     , MonadMask m
                     , MonadSay m
                     , MonadST m
                     , MonadSTM m
+                    , MonadThrow (STM m)
                     , MonadTime m
                     , MonadTimer m)
                  => ArbitrarySDU
@@ -573,8 +571,7 @@ prop_demux_sdu a = do
     run (ArbitraryValidSDU sdu state err_m) = do
         stopVar <- newEmptyTMVarM
 
-        let server_mp = Mx.MiniProtocolDescription Nothing (Just $ serverRsp stopVar)
-        let server_std ChainSync1 = server_mp
+        let server_std ChainSync1 = Mx.MiniProtocolDescription Nothing (Just $ serverRsp stopVar)
 
         (client_w, said) <- plainServer server_std
 
@@ -603,7 +600,7 @@ prop_demux_sdu a = do
 
         setup state client_w
         atomically $ writeTBQueue client_w $ BL.take (isRealLength badSdu) $ encodeInvalidMuxSDU badSdu
-        atomically $ putTMVar stopVar BL.empty
+        atomically $ putTMVar stopVar $ BL.replicate (fromIntegral $ isLength badSdu) 0xa
 
         res <- wait said
         case res of
@@ -631,8 +628,7 @@ prop_demux_sdu a = do
             msg_m <- recv chan
             case msg_m of
                  Just msg ->
-                     let e_m = BL.stripPrefix msg e in
-                     case e_m of
+                     case BL.stripPrefix msg e of
                           Just e' -> loop e'
                           Nothing -> error "recv corruption"
                  Nothing -> error "eof corruption"
@@ -690,11 +686,11 @@ prop_demux_sdu_io badSdu = ioProperty $ prop_demux_sdu badSdu
 demo :: forall m block.
         ( MonadAsync m
         , MonadCatch m
-        , MonadFork m
         , MonadMask m
         , MonadSay m
         , MonadST m
         , MonadSTM m
+        , MonadThrow (STM m)
         , MonadTime m
         , MonadTimer m
         , Chain.HasHeader block
@@ -716,11 +712,11 @@ demo chain0 updates delay = do
     let Just expectedChain = Chain.applyChainUpdates updates chain0
         target = Chain.headPoint expectedChain
         client_mps ChainSync1 = Mx.MiniProtocolDescription
-                                (Just $ consumerInit consumerDone target consumerVar)
+                                (Just $ runChainSyncClient consumerDone target consumerVar)
                                 Nothing
         server_mps ChainSync1 = Mx.MiniProtocolDescription
                                 Nothing
-                                (Just $ producerRsp producerVar)
+                                (Just $ runChainSyncServer producerVar)
 
     clientAsync <- startMuxSTM client_mps client_w client_r sduLen Nothing
     serverAsync <- startMuxSTM server_mps server_w server_r sduLen Nothing
@@ -760,20 +756,18 @@ demo chain0 updates delay = do
         , points = \_ -> pure $ consumerClient target consChain
         }
 
-    consumerInit :: TMVar m Bool -> Point block -> TVar m (Chain block)
+    runChainSyncClient :: TMVar m Bool -> Point block -> TVar m (Chain block)
                  -> Channel m BL.ByteString -> m ()
-    consumerInit done_ target consChain channel = do
+    runChainSyncClient done_ target consChain channel = do
        let consumerPeer = chainSyncClientPeer (chainSyncClientExample consChain
                                                (consumerClient target consChain))
 
        runPeer nullTracer codecChainSync channel consumerPeer
        atomically $ putTMVar done_ True
 
-       return ()
-
-    producerRsp ::  TVar m (CPS.ChainProducerState block)
+    runChainSyncServer ::  TVar m (CPS.ChainProducerState block)
                 -> Channel m BL.ByteString -> m ()
-    producerRsp prodChain channel = do
+    runChainSyncServer prodChain channel = do
         let producerPeer = chainSyncServerPeer (chainSyncServerExample () prodChain)
 
         runPeer nullTracer codecChainSync channel producerPeer
