@@ -223,7 +223,7 @@ data InternalState m up blk hdr = IS {
     , chainDB             :: ChainDB m blk hdr
     , blockFetchInterface :: BlockFetchConsensusInterface up hdr blk m
     , fetchClientRegistry :: FetchClientRegistry up hdr m
-    , varCandidates       :: TVar m (Map up (TVar m (CandidateState blk hdr)))
+    , varCandidates       :: TVar m (Map up (TVar m (CandidateState hdr)))
     , varState            :: TVar m (NodeState (BlockProtocol blk))
     , tracer              :: Tracer m String
     }

@@ -16,13 +16,12 @@ module Ouroboros.Consensus.ChainSyncClient (
   , CandidateState (..)
   ) where
 
-import           Codec.Serialise (encode)
+import           Codec.Serialise (Serialise, encode)
 import           Control.Monad
 import           Control.Monad.Except
 import           Control.Tracer
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
 import           Data.Typeable (Typeable)
 import           Data.Void (Void)
 import           Data.Word (Word64)
@@ -54,7 +53,7 @@ newtype ClockSkew = ClockSkew { unClockSkew :: Word64 }
 type Consensus (client :: * -> * -> (* -> *) -> * -> *) hdr m =
    client hdr (Point hdr) m Void
 
-data ChainSyncClientException blk hdr =
+data ChainSyncClientException hdr =
       -- | The header we received was for a slot too far in the future.
       --
       -- I.e., the slot of the received header was > current slot (according
@@ -87,15 +86,15 @@ data ChainSyncClientException blk hdr =
     | InvalidIntersection (Point hdr)
 
 
-deriving instance ( StandardHash hdr, Show (LedgerError blk)
+deriving instance ( StandardHash hdr
                   , OuroborosTag (BlockProtocol hdr)
                   )
-    => Show (ChainSyncClientException blk hdr)
+    => Show (ChainSyncClientException hdr)
 
-instance ( Typeable hdr, Typeable blk, StandardHash hdr
-         , Show (LedgerError blk), OuroborosTag (BlockProtocol hdr)
+instance ( Typeable hdr, StandardHash hdr
+         , OuroborosTag (BlockProtocol hdr)
          )
-    => Exception (ChainSyncClientException blk hdr)
+    => Exception (ChainSyncClientException hdr)
 
 -- | The state of the candidate chain synched with an upstream node.
 data CandidateState hdr = CandidateState
@@ -117,8 +116,10 @@ chainSyncClient
        , MonadThrow (STM m)
        , ProtocolLedgerView blk
        , HasHeader hdr
-       , BlockProtocol hdr ~ BlockProtocol blk
        , Ord up
+       , BlockProtocol blk ~ BlockProtocol hdr
+       , ProtocolLedgerView blk
+       , Serialise (PreHeader hdr)
        )
     => Tracer m String
     -> NodeConfig (BlockProtocol hdr)
@@ -347,16 +348,10 @@ chainSyncClient _tracer cfg btime (ClockSkew maxSkew) getCurrentChain
 
     -- | Disconnect from the upstream node by throwing the given exception and
     -- removing its candidate from the map of candidates.
-    disconnect :: ChainSyncClientException blk hdr -> STM m a
+    disconnect :: ChainSyncClientException hdr -> STM m a
     disconnect ex = do
       modifyTVar' varCandidates $ Map.delete up
       throwM ex
-
-    -- | Return the 'BlockNo' of the most recent header of the given chain,
-    -- the one at the tip. If the fragment is empty, it must be that we're
-    -- near genesis, so return 'genesisBlockNo' in that case.
-    mostRecentBlockNo :: AnchoredFragment hdr -> BlockNo
-    mostRecentBlockNo = fromMaybe genesisBlockNo . AF.headBlockNo
 
     -- Recent offsets
     --
